@@ -10,6 +10,12 @@
 #
 #   deploy/status.sh --json | jq .
 #
+# The document carries a `schema` number. Bump it whenever a *consumer-visible* field
+# is added or changes meaning. A client reading an older document cannot tell a field
+# that is absent from one that is false, so without this a stale script on a server
+# shows up as "everything is missing" — a screen that is wrong, stuck, and gives no
+# hint that the script is what needs updating.
+#
 # Strictly read-only. It never calls `run`, never writes, and is safe to poll. It
 # also never exits non-zero for a *finding* — a missing container, an unreachable
 # store and an unreadable secrets file are all reported inside the document, because
@@ -55,23 +61,9 @@ jnul() {  # a JSON string, or null when empty
   if [ -n "${1:-}" ]; then jstr "$1"; else echo null; fi
 }
 
-# ==== secrets ================================================================
-# Deliberately not install/lib/secrets.sh: every read there dies on a missing or
-# unreadable file. That is the correct choice for an installer and the wrong one for
-# a status command, which must still describe the other half of the box.
-
-SECRETS_READABLE=false
-if [ -r "$SECRETS_FILE" ] && have yq; then
-  SECRETS_READABLE=true
-elif [ -f "$SECRETS_FILE" ]; then
-  note "secrets.yaml exists but is not readable as this user — domains, pinned images and env key names are unavailable. Re-run with sudo for the full picture."
-else
-  note "no secrets file at $SECRETS_FILE — this box has not been through install.sh."
-fi
-
 sget() {  # sget YQ_PATH [default] — "" rather than a fatal error when unavailable
   local path="$1" default="${2:-}" value
-  if [ "$SECRETS_READABLE" != "true" ]; then echo "$default"; return 0; fi
+  if [ "${SECRETS_READABLE:-false}" != "true" ]; then echo "$default"; return 0; fi
   value="$(yq -r "$path" "$SECRETS_FILE" 2>/dev/null || true)"
   if [ "$value" = "null" ]; then value=""; fi
   echo "${value:-$default}"
@@ -80,6 +72,47 @@ sget() {  # sget YQ_PATH [default] — "" rather than a fatal error when unavail
 http_status() {  # http_status URL -> the code, or "" when nothing answered
   curl -fsS -o /dev/null -m 6 -w '%{http_code}' "$1" 2>/dev/null || true
 }
+
+# ==== secrets ================================================================
+# Deliberately not install/lib/secrets.sh: every read there dies on a missing or
+# unreadable file. That is the correct choice for an installer and the wrong one for
+# a status command, which must still describe the other half of the box.
+
+SECRETS_PRESENT=false
+SECRETS_READABLE=false
+[ -f "$SECRETS_FILE" ] && SECRETS_PRESENT=true
+
+if [ -r "$SECRETS_FILE" ] && have yq; then
+  SECRETS_READABLE=true
+elif [ "$SECRETS_PRESENT" = "true" ] && ! have yq; then
+  note "yq (v4) is not installed, so $SECRETS_FILE cannot be read."
+elif [ "$SECRETS_PRESENT" = "true" ]; then
+  note "secrets.yaml exists but is not readable as this user — domains, pinned images and env key names are unavailable. Re-run with sudo for the full picture."
+else
+  note "no secrets file at $SECRETS_FILE — this box has not been through install.sh."
+fi
+
+# Which values are still placeholders, split by who can fill them.
+#
+# `CHANGEME-openssl-rand-hex-32` says so in the value: any of those can be generated
+# here. A bare `CHANGEME` is an API key or a credential only its owner has. Splitting
+# them is what lets a setup screen say "press this" for one group and "go and get
+# these" for the other, rather than showing one undifferentiated list of 9 things.
+PLACEHOLDERS_GEN='[]'
+PLACEHOLDERS_MANUAL='[]'
+if [ "$SECRETS_READABLE" = "true" ] && have jq; then
+  ALL_PATHS="$(yq -o=json '.' "$SECRETS_FILE" 2>/dev/null \
+    | jq -c '[paths(type == "string" and test("CHANGEME")) | join(".")]' 2>/dev/null || echo '[]')"
+  GEN_PATHS="$(yq -o=json '.' "$SECRETS_FILE" 2>/dev/null \
+    | jq -c '[paths(type == "string" and test("CHANGEME-openssl-rand-hex")) | join(".")]' 2>/dev/null || echo '[]')"
+  PLACEHOLDERS_GEN="$GEN_PATHS"
+  PLACEHOLDERS_MANUAL="$(printf '%s' "$ALL_PATHS" | jq -c --argjson gen "$GEN_PATHS" '. - $gen')"
+fi
+
+# Two settings that are not CHANGEME but are still the example's values, and both
+# break ACME silently if left. Reported so a setup screen can say so.
+ACME_EMAIL="$(sget '.infra.acme_email')"
+case "$ACME_EMAIL" in ''|*example.com) ACME_SET=false ;; *) ACME_SET=true ;; esac
 
 # ==== the registry ===========================================================
 # Queried once with amber's key; every app's registration state is then read out of
@@ -241,6 +274,17 @@ jq -n \
   --argjson docker          "$(jnul "$DOCKER_VERSION")" \
   --argjson compose         "$(jnul "$COMPOSE_VERSION")" \
   --argjson secretsReadable "$SECRETS_READABLE" \
+  --argjson secretsPresent  "$SECRETS_PRESENT" \
+  --arg     secretsPath     "$SECRETS_FILE" \
+  --argjson placeholdersGen "$PLACEHOLDERS_GEN" \
+  --argjson placeholdersManual "$PLACEHOLDERS_MANUAL" \
+  --argjson acmeEmailSet    "$ACME_SET" \
+  --argjson tools           "$(jq -n \
+      --argjson git "$(have git && echo true || echo false)" \
+      --argjson jq_ "$(have jq && echo true || echo false)" \
+      --argjson yq_ "$(have yq && echo true || echo false)" \
+      --argjson docker "$(have docker && echo true || echo false)" \
+      '{git: $git, jq: $jq_, yq: $yq_, docker: $docker}')" \
   --argjson apps            "$APPS" \
   --arg     caddyState      "$CADDY_STATE" \
   --arg     caddyHealth     "$(container_health caddy)" \
@@ -255,8 +299,16 @@ jq -n \
   --argjson warnings        "$WARNINGS" \
   '{
      installed: true,
+     schema: 2,
      repoRoot: $repoRoot, commit: $commit, role: $role, primaryDomain: $primaryDomain,
-     docker: $docker, compose: $compose, secretsReadable: $secretsReadable,
+     docker: $docker, compose: $compose,
+     tools: $tools,
+     secrets: {
+       present: $secretsPresent, readable: $secretsReadable, path: $secretsPath,
+       acmeEmailSet: $acmeEmailSet,
+       placeholders: { generatable: $placeholdersGen, manual: $placeholdersManual }
+     },
+     secretsReadable: $secretsReadable,
      apps: $apps,
      caddy: { running: ($caddyState == "running"), health: $caddyHealth, sites: $caddySites },
      syncStore: { url: $syncUrl, reachable: $syncReachable, servers: $syncServers },
