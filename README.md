@@ -20,7 +20,7 @@ sync-store/    the registry + Aperture's config sync   <- start here
 amber/         Amber's image, compose, and self-update units
 secrets/       secrets.example.yaml — the single source for every generated .env
 install/       install.sh, uninstall.sh, and the shell library they share
-deploy/        rollback.sh, update-amber.sh, migrate-amber-db.sh, watchtower
+deploy/        rollback.sh, update-amber.sh, migrate-amber-db.sh, status.sh, watchtower
 backup/        sqlite + postgres snapshots, retention, restore rehearsal
 ci-templates/  ci.yml and release.yml, to copy into each repo
 ```
@@ -102,6 +102,25 @@ not before.
 or any box without Docker.
 
 ## Runbook
+
+**What is on this box?**
+
+```bash
+sudo bash /opt/amber-infra/deploy/status.sh --json | jq .
+```
+
+Read-only, safe to poll, and the only script here that answers a program rather than
+a human: Aperture's Servers tab renders it directly and drives the scripts above
+through composed flags, so there is no second implementation of what any of them
+decides. Without root it still works and reports `secretsReadable: false` — the app
+list then degrades to what Docker alone can say. It never prints a secret: values
+under `apps.*.env` and every token are dropped structurally, and only key *names* are
+emitted, so a GUI can tell you `AMBER_OPENAI_API_KEY` is set without ever having seen
+it.
+
+The field worth reading is `imagePinned` vs `imageRunning`. They diverge when a pin
+was bumped and nothing restarted — the state where every health check is green and
+the code running is not the code you think it is.
 
 **Rotate a peer token.** Edit `sync_store.keys[]` in `secrets.yaml`, re-run
 `install.sh --app <name>`, restart the app. To change the credential *Amber presents

@@ -7,6 +7,11 @@
 #     `touch /signals/update-requested`; amber-update.path sees it and starts
 #     amber-update.service, which runs this.
 #   * by hand — `sudo /opt/amber-infra/deploy/update-amber.sh`
+#   * from Aperture — the Servers tab runs it with --dry-run first, then for real.
+#
+# --dry-run prints every mutating action and changes nothing, matching install.sh and
+# rollback.sh. Every action a GUI can trigger has to be rehearsable, or the GUI is
+# asking you to trust that it composed the flags right.
 #
 # What it reconciles, in order, each step idempotent:
 #   sentinel   removed FIRST, so the .path unit re-arms and a failure here does not
@@ -33,6 +38,14 @@ SIGNAL_DIR="${SIGNAL_DIR:-/var/lib/amber-infra/amber/signals}"
 SENTINEL="$SIGNAL_DIR/update-requested"
 HISTORY="/var/lib/amber-infra/deploy-history"
 
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --dry-run) DRY_RUN=1; shift ;;
+    -h|--help) sed -n '2,26p' "$0"; exit 0 ;;
+    *)         die "unknown argument: $1" ;;
+  esac
+done
+
 require_root
 [ -f "$COMPOSE_FILE" ] || die "no compose file at $COMPOSE_FILE — is Amber containerised on this box?"
 
@@ -40,7 +53,7 @@ require_root
 #    armed for the next request rather than stuck holding a file it already fired on.
 if [ -f "$SENTINEL" ]; then
   step "Voice-triggered update request received"
-  rm -f "$SENTINEL"
+  run rm -f "$SENTINEL"
 fi
 
 BEFORE="$(image_of "$COMPOSE_FILE")"
@@ -72,7 +85,7 @@ compose "$AMBER_DIR" up -d
 # 4. Health, and revert if it does not come back.
 if wait_healthy amber 120; then
   ok "Amber is healthy on $BEFORE"
-  printf '%s\tamber\t%s\t%s\tok\n' "$(iso_now)" "$BEFORE" "$BEFORE" >> "$HISTORY"
+  dry || printf '%s\tamber\t%s\t%s\tok\n' "$(iso_now)" "$BEFORE" "$BEFORE" >> "$HISTORY"
   exit 0
 fi
 
@@ -85,10 +98,10 @@ if [ -z "$PREVIOUS" ] || [ "$PREVIOUS" = "$BEFORE" ]; then
 fi
 
 step "Reverting to $PREVIOUS"
-sed -i -E "s|^(\s*image:).*|\1 $PREVIOUS|" "$COMPOSE_FILE"
+dry || sed -i -E "s|^(\s*image:).*|\1 $PREVIOUS|" "$COMPOSE_FILE"
 compose "$AMBER_DIR" up -d
 if wait_healthy amber 120; then
-  printf '%s\tamber\t%s\t%s\treverted\n' "$(iso_now)" "$BEFORE" "$PREVIOUS" >> "$HISTORY"
+  dry || printf '%s\tamber\t%s\t%s\treverted\n' "$(iso_now)" "$BEFORE" "$PREVIOUS" >> "$HISTORY"
   die "update failed; Amber has been reverted to $PREVIOUS and is healthy"
 fi
 die "update failed AND the revert to $PREVIOUS did not come up — docker logs amber --tail 100"
