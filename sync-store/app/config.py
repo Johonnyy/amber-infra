@@ -51,7 +51,7 @@ class Settings(BaseSettings):
     default_stale_after_s: int = 0
 
     # --- Config sync ---
-    #: 1 MiB. Lucidity's blob is device config, not a data store.
+    #: 1 MiB. Aperture's blob is device config, not a data store.
     max_blob_bytes: int = 1_048_576
     #: Rows retained per device_id. Free undo, bounded growth.
     config_history: int = 50

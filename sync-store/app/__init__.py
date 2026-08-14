@@ -1,4 +1,4 @@
-"""sync-store — the ecosystem's registry and Lucidity's cross-device config store."""
+"""sync-store — the ecosystem's registry and Aperture's cross-device config store."""
 
 from __future__ import annotations
 

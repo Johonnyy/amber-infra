@@ -54,7 +54,7 @@ secrets_set() {  # secrets_set '.sync_store.keys[0].token' VALUE — write back 
 
 secrets_sync_store_keys() {
   # Render sync_store.keys[] into the SYNC_STORE_KEYS wire format:
-  #   "amber:tok,lucidity:tok,spawner:tok"
+  #   "amber:tok,Aperture:tok,spawner:tok"
   # The name half is what the store logs when that caller registers; the token
   # half never appears in a log line. See sync-store/app/auth.py.
   secrets_check

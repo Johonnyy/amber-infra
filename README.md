@@ -16,7 +16,7 @@ registers herself.
 
 ```
 caddy/         the TLS edge: one Caddyfile, one snippet per app
-sync-store/    the registry + Lucidity's config sync   <- start here
+sync-store/    the registry + Aperture's config sync   <- start here
 amber/         Amber's image, compose, and self-update units
 secrets/       secrets.example.yaml — the single source for every generated .env
 install/       install.sh, uninstall.sh, and the shell library they share

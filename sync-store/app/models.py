@@ -90,7 +90,7 @@ class ServerDescriptor(BaseModel):
 class RegisterResponse(BaseModel):
     """Never parsed by the real client — it only calls ``raise_for_status()``.
 
-    This body exists for ``curl`` and for Lucidity.
+    This body exists for ``curl`` and for Aperture.
     """
 
     status: str = "ok"

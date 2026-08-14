@@ -1,4 +1,4 @@
-# sync-store — the discovery registry and Lucidity's config sync.
+# sync-store — the discovery registry and Aperture's config sync.
 #
 # A plain JSON API: no streaming, so no (streaming) import. Registration POSTs are
 # small and the client's own timeout is 5s, so the default proxy behaviour is right.

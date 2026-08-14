@@ -1,6 +1,6 @@
 # sync-store
 
-The ecosystem's discovery registry and Lucidity's cross-device config store. One
+The ecosystem's discovery registry and Aperture's cross-device config store. One
 FastAPI process, one SQLite file, four runtime dependencies.
 
 It exists because `agent-mcp-py` already implements both halves of a contract with
@@ -23,7 +23,7 @@ Two asymmetries in that contract are the reason this service is not a thin CRUD 
 typed `tuple[str, ...]` and built with a bare `tuple(raw.get("tools") or ())`. Echo
 the objects back under `tools` and every downstream agent holds dicts where it
 expects strings. The store keeps the objects and serves both: `tools` (bare names,
-the contract) and `tool_details` (the objects, for Lucidity).
+the contract) and `tool_details` (the objects, for Aperture).
 
 **Nothing writes the `token` field that everything reads.** `PeerRegistry` reads a
 per-server `token`, and `agent_runtime`'s MCP client presents it as the outbound
@@ -50,7 +50,7 @@ GET    /config                     ?device_id= optional; newest wins; nulls if e
 GET    /config/history             metadata only, no blobs
 ```
 
-The config half is Lucidity's storage and nothing else. The store never interprets
+The config half is Aperture's storage and nothing else. The store never interprets
 the blob; it stores bytes and hands them back.
 
 ## Staleness fails open

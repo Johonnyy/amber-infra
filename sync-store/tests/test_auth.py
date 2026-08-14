@@ -25,8 +25,8 @@ def test_a_named_token_is_parsed_with_its_name():
 
 
 def test_several_keys_are_parsed_together():
-    assert parse_keys("amber:a,lucidity:b,c") == {
-        "a": "amber", "b": "lucidity", "c": fingerprint("c")
+    assert parse_keys("amber:a,Aperture:b,c") == {
+        "a": "amber", "b": "Aperture", "c": fingerprint("c")
     }
 
 

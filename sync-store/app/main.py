@@ -4,9 +4,9 @@ Two conceptually separate things in one tiny service, because running two proces
 for this would be silly:
 
 * **``/servers``** — what every ``agent-mcp-py`` app POSTs on startup and every 300
-  seconds thereafter, and what Amber, the spawner and Lucidity GET to discover
+  seconds thereafter, and what Amber, the spawner and Aperture GET to discover
   peers. The shapes are not ours to choose; see ``app/models.py``.
-* **``/config``** — Lucidity's cross-device storage for one opaque JSON blob. The
+* **``/config``** — Aperture's cross-device storage for one opaque JSON blob. The
   store never interprets it.
 
 Three conventions carried from the ecosystem:
@@ -288,7 +288,7 @@ def build_app(settings: Settings | None = None, *, store: Store | None = None) -
     async def put_config(
         request: Request, payload: ConfigWrite, caller: AuthResult = Caller
     ) -> dict:
-        """Store one opaque blob. Lucidity owns its shape; we never look inside."""
+        """Store one opaque blob. Aperture owns its shape; we never look inside."""
         size = len(json.dumps(payload.blob, separators=(",", ":"), sort_keys=True).encode())
         if size > settings.max_blob_bytes:
             raise StarletteHTTPException(

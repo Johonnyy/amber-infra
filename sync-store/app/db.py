@@ -2,7 +2,7 @@
 
 Two tables, one file, and no relationship between them. The **server registry** is
 what ``agent_mcp.sync_client.register()`` writes and ``agent_mcp.registry
-.PeerRegistry.refresh()`` reads. The **config blobs** are Lucidity's cross-device
+.PeerRegistry.refresh()`` reads. The **config blobs** are Aperture's cross-device
 storage, which this service never interprets. They share a process because running
 two services for this would be silly, and share nothing else.
 
@@ -50,9 +50,9 @@ CREATE TABLE IF NOT EXISTS servers (
 CREATE INDEX IF NOT EXISTS idx_servers_last_seen ON servers (last_seen);
 
 CREATE TABLE IF NOT EXISTS config_blobs (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,  -- the change cursor Lucidity polls
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,  -- the change cursor Aperture polls
     device_id   TEXT    NOT NULL,
-    blob_json   TEXT    NOT NULL,   -- opaque: Lucidity owns the shape, we never parse it
+    blob_json   TEXT    NOT NULL,   -- opaque: Aperture owns the shape, we never parse it
     byte_size   INTEGER NOT NULL,
     created_at  TEXT    NOT NULL
 );
@@ -201,7 +201,7 @@ class Store:
             "version": row["version"],
             "token": row["token"],
             # The two shapes of the same list. `tools` is the contract; `tool_details`
-            # is for Lucidity's UI, and PeerRegistry ignores keys it does not know.
+            # is for Aperture's UI, and PeerRegistry ignores keys it does not know.
             "tools": _tool_names(row["tools_json"]),
             "tool_details": _loads_list(row["tools_json"]),
             "resources": _loads_list(row["resources_json"]),

@@ -72,7 +72,7 @@ def parse_keys(raw: str | None) -> dict[str, str]:
     """Parse a comma-separated key list into ``{token: caller_name}``.
 
     Accepts both the plain form (``"abc123,def456"``) and a ``name:token`` form
-    (``"amber:abc123,lucidity:def456"``) that makes a registration attributable.
+    (``"amber:abc123,Aperture:def456"``) that makes a registration attributable.
     Blank entries and surrounding whitespace are ignored so a trailing comma in a
     ``.env`` file is not a footgun.
     """

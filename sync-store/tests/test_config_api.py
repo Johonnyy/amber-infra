@@ -1,4 +1,4 @@
-"""Lucidity's config sync over a real socket.
+"""Aperture's config sync over a real socket.
 
 The one thing every test here is really asserting: the store does not interpret the
 blob. It stores bytes and hands them back.
@@ -34,7 +34,7 @@ def _free_port() -> int:
 def live():
     settings = Settings(
         _env_file=None,
-        keys=f"lucidity:{TOKEN}",
+        keys=f"Aperture:{TOKEN}",
         allow_anonymous=False,
         max_blob_bytes=2048,
         config_history=3,
@@ -63,7 +63,7 @@ def client(live):
 
 
 async def test_an_empty_store_returns_a_null_blob_rather_than_404(client):
-    """A first-run Lucidity should not need a special case."""
+    """A first-run Aperture should not need a special case."""
     async with client() as http:
         response = await http.get("/config", params={"device_id": "never-written"}, headers=AUTH)
     assert response.status_code == 200
