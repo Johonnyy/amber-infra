@@ -1,0 +1,19 @@
+# Amber — voice WebSocket at /ws, MCP streamable HTTP at /mcp, health at /health.
+#
+# ONE reverse_proxy covers all three. Caddy v2 proxies an `Upgrade: websocket`
+# request transparently: no @ws matcher, no header_up Connection, none of the nginx
+# ritual. Adding an explicit @ws block is not merely unnecessary, it is a footgun —
+# `reverse_proxy @ws ...` followed by a bare `reverse_proxy ...` creates two
+# handlers with different option sets, and whichever one you forgot to configure is
+# the one that will drop your streaming settings.
+#
+# The upstream is a loopback port, which is true whether Amber runs in a container
+# (she does now) or under systemd — see install/README.md.
+
+amber.johnny.dev {
+	import common amber
+
+	reverse_proxy 127.0.0.1:8000 {
+		import streaming
+	}
+}

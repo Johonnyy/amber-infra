@@ -1,0 +1,22 @@
+# The real secrets file lives at /etc/amber-infra/secrets.yaml and is never in git.
+# This pattern is here so a local copy for testing cannot be committed by accident.
+secrets/secrets.yaml
+secrets.yaml
+*.env
+!*.env.example
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+
+# SQLite, including the WAL sidecars — a stray -wal is what makes a copied db
+# corrupt, and committing one would be worse.
+*.db
+*.db-wal
+*.db-shm
+
+# Rendered artefacts
+caddy/snippets/*.generated.caddy

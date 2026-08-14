@@ -1,0 +1,32 @@
+# Deployed to /etc/amber-infra/sync-store/docker-compose.prod.yml by install.sh.
+#
+# The image tag is PINNED and changes only through a deliberate edit or
+# deploy/rollback.sh. Never `latest`: a restart must never change the code, and
+# ci-templates/ci.yml fails the build if this file grows a floating tag.
+services:
+  sync-store:
+    image: ghcr.io/johonnyy/sync-store:0.1.0
+    container_name: sync-store
+    restart: unless-stopped
+    env_file:
+      - ./sync-store.env          # rendered from secrets.yaml, chmod 600 root:root
+    ports:
+      # Loopback only. Caddy runs with host networking and proxies to 127.0.0.1;
+      # binding 0.0.0.0 here would publish the registry past the TLS edge.
+      - "127.0.0.1:8081:8080"
+    volumes:
+      - sync-store-data:/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    labels:
+      # Core services are exact-pinned, so Watchtower would be a no-op anyway —
+      # this makes the intent explicit rather than incidental. See
+      # deploy/watchtower/docker-compose.watchtower.yml.
+      com.centurylinklabs.watchtower.enable: "false"
+
+volumes:
+  sync-store-data:
+    name: sync-store-data

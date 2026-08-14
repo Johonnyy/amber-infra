@@ -1,0 +1,24 @@
+# Watches for the voice self-update sentinel.
+#
+# Install to /etc/systemd/system/amber-update.path, then:
+#   systemctl enable --now amber-update.path
+#
+# Why a sentinel file at all: AMBER_UPDATE_COMMAND runs INSIDE Amber's process. In a
+# container there is no systemctl and no Docker socket, so the update cannot happen
+# there. The alternatives were to mount the Docker socket into Amber's container
+# (root on the host, reachable by anything the model can be talked into invoking) or
+# to run an updater sidecar holding the socket behind an HTTP endpoint. A file is
+# less surface than either, and it matches the semantics Amber already had: the
+# systemd-run version was fire-and-forget too, so she has always reported "started"
+# rather than "finished".
+
+[Unit]
+Description=Watch for Amber's voice-triggered update request
+
+[Path]
+PathExists=/var/lib/amber-infra/amber/signals/update-requested
+# The service removes the sentinel first thing, which re-arms this unit.
+Unit=amber-update.service
+
+[Install]
+WantedBy=multi-user.target

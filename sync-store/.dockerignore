@@ -1,0 +1,10 @@
+tests/
+.venv/
+__pycache__/
+*.pyc
+*.db
+*.db-wal
+*.db-shm
+.env
+.pytest_cache/
+docker-compose*.yml

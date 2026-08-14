@@ -1,0 +1,41 @@
+# The TLS edge. Deployed to /etc/amber-infra/caddy/docker-compose.caddy.yml.
+#
+# network_mode: host, deliberately.
+#
+# Server A is mixed: containers on loopback ports plus, historically, systemd
+# services. On a bridge network Caddy reaches containers by name but needs
+# host.docker.internal or a hardcoded 172.17.0.1 to reach anything else, and that
+# address is not portable between hosts. With host networking every upstream is
+# `127.0.0.1:<port>` regardless of what serves it, ACME's :80/:443 binding is free,
+# and every app publishing on loopback only means a firewall slip cannot expose an
+# app past the TLS edge.
+services:
+  caddy:
+    image: caddy:2.8-alpine
+    container_name: caddy
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      # From secrets.yaml: infra.acme_email. Caddy fails ACME without it.
+      ACME_EMAIL: "${ACME_EMAIL:?set ACME_EMAIL, from secrets.yaml infra.acme_email}"
+    volumes:
+      - /etc/caddy:/etc/caddy:ro
+      - /var/log/caddy:/var/log/caddy
+      # caddy-data holds the ACME certificates and account key. LOSING THIS VOLUME
+      # MEANS RE-ISSUING EVERY CERTIFICATE and burning Let's Encrypt rate limit, so
+      # it is in the backup list — see backup/backup-sqlite.sh's volume targets.
+      - caddy-data:/data
+      - caddy-config:/config
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    labels:
+      com.centurylinklabs.watchtower.enable: "false"
+
+volumes:
+  caddy-data:
+    name: caddy-data
+  caddy-config:
+    name: caddy-config

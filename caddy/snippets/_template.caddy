@@ -1,0 +1,14 @@
+# Template rendered by install/lib/caddy.sh::caddy_add_site. Edit THIS file, not the
+# generated snippets — a regenerated site overwrites its own file.
+#
+# The (streaming) import is included by default: an app agent built on agent-mcp-py
+# serves MCP over streamable HTTP at /mcp, which is SSE, which buffers without it.
+# Drop the import only for an app you know is request/response only (see
+# sync-store.caddy).
+{{DOMAIN}} {
+	import common {{APP_NAME}}
+
+	reverse_proxy {{UPSTREAM}} {
+		import streaming
+	}
+}

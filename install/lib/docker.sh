@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+#
+# Docker and Compose plumbing.
+#
+# wait_healthy is the important one. `docker compose up -d` returns as soon as the
+# container is *created*, not when the app inside is answering — so every deploy
+# step in this repo follows it with a health wait, and every rollback decision is
+# made on the result. Every image in this repo declares a HEALTHCHECK for that
+# reason; a container without one reports "none" here and is treated as unknown
+# rather than healthy.
+
+[ -n "${_AMBER_INFRA_DOCKER:-}" ] && return 0
+_AMBER_INFRA_DOCKER=1
+
+. "$(dirname "${BASH_SOURCE[0]}")/common.sh"
+
+ensure_docker() {
+  if have docker && docker info >/dev/null 2>&1; then
+    ok "docker present"
+  else
+    step "Installing Docker"
+    run bash -c 'curl -fsSL https://get.docker.com | sh'
+    run systemctl enable --now docker
+    ok "docker installed"
+  fi
+  ensure_compose_plugin
+}
+
+ensure_compose_plugin() {
+  if docker compose version >/dev/null 2>&1; then
+    ok "docker compose plugin present"
+    return 0
+  fi
+  step "Installing the docker compose plugin"
+  run apt-get install -y docker-compose-plugin
+  docker compose version >/dev/null 2>&1 || die "docker compose still unavailable after install"
+}
+
+compose() {  # compose DIR ARGS... — always -f the prod file, always from its dir
+  local dir="$1"; shift
+  local file
+  file="$(ls "$dir"/docker-compose*.yml 2>/dev/null | head -n1)"
+  [ -n "$file" ] || die "no compose file in $dir"
+  run docker compose -f "$file" --project-directory "$dir" "$@"
+}
+
+compose_up() {  # compose_up DIR
+  local dir="$1"
+  compose "$dir" pull
+  compose "$dir" up -d
+}
+
+container_health() {  # container_health NAME -> healthy|unhealthy|starting|none|missing
+  docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' \
+    "$1" 2>/dev/null || echo missing
+}
+
+wait_healthy() {  # wait_healthy NAME TIMEOUT_S
+  local name="$1" timeout="${2:-90}" waited=0 status
+  if dry; then
+    echo "   ${c_yellow}dry-run${c_off} would wait for $name to become healthy"
+    return 0
+  fi
+  while [ "$waited" -lt "$timeout" ]; do
+    status="$(container_health "$name")"
+    case "$status" in
+      healthy) ok "$name is healthy"; return 0 ;;
+      # A container with no HEALTHCHECK cannot be waited on meaningfully. Say so
+      # rather than sleeping out the timeout and calling it a failure.
+      none)    warn "$name declares no healthcheck — treating 'running' as good enough"
+               [ "$(docker inspect -f '{{.State.Running}}' "$name" 2>/dev/null)" = "true" ] && return 0
+               ;;
+      missing) warn "$name does not exist yet" ;;
+    esac
+    sleep 3
+    waited=$((waited + 3))
+  done
+  warn "$name did not become healthy within ${timeout}s (last status: $(container_health "$name"))"
+  return 1
+}
+
+image_of() {  # image_of COMPOSE_FILE -> the pinned image reference
+  grep -E '^\s*image:' "$1" | head -n1 | sed -E 's/^\s*image:\s*//; s/\s*$//'
+}

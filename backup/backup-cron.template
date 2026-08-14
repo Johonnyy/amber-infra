@@ -1,0 +1,41 @@
+# /etc/cron.d/amber-infra-backup — installed 0644 root:root by install.sh.
+#
+# Two things about the cron.d format that bite people:
+#   * every line needs a USER field (the `root` below) — unlike a user crontab
+#   * the file MUST end with a newline, or cron silently ignores the last entry
+#
+# Times are deliberately off-peak and on odd minutes, so two servers backing up to
+# the same offsite bucket do not collide.
+
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# Set an address to have cron mail you the summary. Both scripts exit non-zero on
+# any failure, and print a one-line summary either way, so the mail is short and
+# only interesting when something is wrong.
+MAILTO=""
+
+17 3 * * *  root  /opt/amber-infra/backup/backup-sqlite.sh   >>/var/log/amber-infra/backup.log 2>&1
+27 3 * * *  root  /opt/amber-infra/backup/backup-postgres.sh >>/var/log/amber-infra/backup.log 2>&1
+
+# The weekly restore rehearsal. This is the only line that proves the other two are
+# worth anything: it actually gunzips the newest snapshot and runs integrity_check
+# on it. A backup you have never restored is not a backup.
+41 4 * * 0  root  /opt/amber-infra/backup/backup-sqlite.sh --verify-latest >>/var/log/amber-infra/backup.log 2>&1
+
+# --- systemd timer alternative -----------------------------------------------
+# Prefer timers if the box reboots often: cron simply skips a run it was asleep
+# for, while a timer with Persistent=true catches up on the next boot. Roughly:
+#
+#   /etc/systemd/system/amber-backup.service
+#     [Service]
+#     Type=oneshot
+#     ExecStart=/opt/amber-infra/backup/backup-sqlite.sh
+#
+#   /etc/systemd/system/amber-backup.timer
+#     [Timer]
+#     OnCalendar=*-*-* 03:17:00
+#     Persistent=true
+#     [Install]
+#     WantedBy=timers.target
+#
+#   systemctl enable --now amber-backup.timer

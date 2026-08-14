@@ -1,0 +1,48 @@
+# Watchtower — automatic container updates for Server B only.
+#
+# THE TENSION, STATED PLAINLY: Watchtower updates a container when the DIGEST behind
+# its TAG moves. A container pinned to :0.1.0 is therefore one Watchtower will
+# correctly never touch. "Watchtower for auto-updates" and "pinned tags, never
+# latest" are not the same policy, and pretending otherwise gives you a Watchtower
+# that silently does nothing.
+#
+# The resolution:
+#   * CORE services (Amber, sync-store, Caddy) are exact-pinned and opted OUT with
+#     `com.centurylinklabs.watchtower.enable: "false"`. They are updated
+#     deliberately — bump the pin, or run deploy/rollback.sh — and later by a
+#     GitHub Actions webhook deploy.
+#   * SERVER B app agents use :stable — a moving tag that is still not :latest,
+#     republished by ci-templates/release.yml only after CI is green — and opt IN.
+#
+# WATCHTOWER_LABEL_ENABLE=true makes that opt-in explicit: a container is not
+# auto-updated until someone labels it so. The default (update everything) is how
+# you find out at 3am that a base image changed.
+#
+# SECURITY, and the reason this file says "Server B only": Watchtower mounts the
+# Docker socket, which is root on the host. Server A holds Amber's .env (OpenAI and
+# OpenRouter keys, the WS auth secret) and the sync-store's registry credentials.
+# Granting a polling daemon root there to save a manual `docker compose up -d` on a
+# personal deployment is a bad trade. Update Server A deliberately.
+#
+# WATCHTOWER_CLEANUP is FALSE here too: the old image on disk IS the rollback that
+# deploy/rollback.sh uses. Reclaiming that disk space costs you offline recovery.
+services:
+  watchtower:
+    image: containrrr/watchtower:1.7.1
+    container_name: watchtower
+    restart: unless-stopped
+    environment:
+      WATCHTOWER_LABEL_ENABLE: "true"
+      WATCHTOWER_CLEANUP: "false"
+      WATCHTOWER_POLL_INTERVAL: "300"
+      WATCHTOWER_INCLUDE_RESTARTING: "true"
+      TZ: "${TZ:-UTC}"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    labels:
+      com.centurylinklabs.watchtower.enable: "false"

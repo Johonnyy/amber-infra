@@ -1,0 +1,15 @@
+# The canonical copy of this file lives in amber-infra/amber/.dockerignore; an
+# identical copy is committed to the amber repo, where the build context is.
+.venv/
+tests/
+scripts/
+deploy/
+__pycache__/
+*.pyc
+*.db
+*.db-wal
+*.db-shm
+.env
+.git/
+.github/
+.pytest_cache/

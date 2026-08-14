@@ -1,0 +1,36 @@
+[project]
+name = "sync-store"
+version = "0.1.0"
+description = "The hosted registry + config sync store for the Amber ecosystem."
+requires-python = ">=3.11"
+# Four runtime dependencies, deliberately. Every app in the ecosystem depends on
+# this service for peer discovery, so it must be the most boring, most available
+# process on Server A. See app/auth.py on why agent-mcp-py is NOT here.
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    # DEV ONLY. tests/test_contract_agent_mcp.py drives the REAL client against a
+    # live store, which is what keeps app/auth.py's mirrored copy honest. It also
+    # brings httpx2 transitively, which is the HTTP client the API tests use — see
+    # the note in tests/test_servers_api.py on why not starlette.testclient.
+    "agent-mcp-py @ git+https://github.com/Johonnyy/agent-mcp-py@793a449",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

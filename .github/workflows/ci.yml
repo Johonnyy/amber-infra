@@ -1,0 +1,85 @@
+# This repo's own CI: the ci-templates/ci.yml test job, plus three validation jobs
+# that only make sense here.
+#
+# Those three are config validation, not Python lint — they do not reopen the
+# "should we adopt ruff" question. They exist because this repo's failure mode is
+# different from a library's: a broken Caddyfile or an unpinned image does not fail
+# a test, it fails at 3am on a server.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    defaults:
+      run:
+        working-directory: sync-store
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: sync-store/pyproject.toml
+      # The dev extra pulls agent-mcp-py from git — that is what
+      # tests/test_contract_agent_mcp.py drives against a live store, and the only
+      # thing keeping app/auth.py's mirrored copy honest.
+      - run: pip install -e ".[dev]"
+      - run: pytest -q
+
+  shell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y shellcheck
+      # -x makes shellcheck follow `. install/lib/common.sh`. Without it every
+      # shared helper is reported as an unknown command and the output is noise.
+      - run: shellcheck -x $(git ls-files '*.sh')
+
+  caddy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate the Caddyfile and every snippet
+        run: |
+          docker run --rm -v "$PWD/caddy":/etc/caddy -e ACME_EMAIL=ci@example.com \
+            caddy:2.8-alpine caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+
+  compose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parse every compose file
+        run: |
+          for f in $(git ls-files '*docker-compose*.yml'); do
+            echo "== $f"
+            ACME_EMAIL=ci@example.com docker compose -f "$f" config -q
+          done
+      - name: Production compose files must pin an explicit, non-latest tag
+        # The rule, enforced. Without this it stays true only for as long as
+        # somebody remembers it.
+        run: |
+          if git ls-files '*docker-compose.prod.yml' | xargs -r grep -nE 'image:.*(:latest$|:latest[[:space:]])'; then
+            echo "::error::production compose files must not use :latest"
+            exit 1
+          fi
+          if git ls-files '*docker-compose.prod.yml' | xargs -r grep -nE 'image:[[:space:]]*[^:[:space:]]+[[:space:]]*$'; then
+            echo "::error::production compose files must pin an explicit tag"
+            exit 1
+          fi

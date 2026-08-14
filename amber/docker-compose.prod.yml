@@ -1,0 +1,38 @@
+# Amber, containerised. Deployed to /etc/amber-infra/amber/docker-compose.prod.yml.
+#
+# Migrating from the systemd unit is deploy/migrate-amber-db.sh — do NOT just start
+# this on a box that has a live /opt/amber. amber.db is WAL with three co-tenant
+# writers and needs a real snapshot, not a copy.
+services:
+  amber:
+    image: ghcr.io/johonnyy/amber:0.1.0
+    container_name: amber
+    restart: unless-stopped
+    env_file:
+      - ./amber.env               # rendered from secrets.yaml, chmod 600 root:root
+    ports:
+      # Loopback only; Caddy (host networking) terminates TLS and proxies here.
+      # The WebSocket at /ws needs `wss://`, which is the whole reason the edge
+      # exists — browser clients on an HTTPS page refuse a plain ws://.
+      - "127.0.0.1:8000:8000"
+    volumes:
+      # amber.db lives here: memory facts, conversations, tasks, reminders, plus
+      # agent_mcp_usage and agent_runtime_usage as co-tenants.
+      - amber-data:/data
+      # The voice self-update channel. AMBER_UPDATE_COMMAND touches a file in here;
+      # a systemd .path unit on the host watches for it and runs the real update.
+      # A bind mount rather than a named volume precisely so the host can watch it.
+      # See amber/amber-update.path and deploy/update-amber.sh.
+      - /var/lib/amber-infra/amber/signals:/signals
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    labels:
+      # Core service: exact-pinned and updated deliberately, never by Watchtower.
+      com.centurylinklabs.watchtower.enable: "false"
+
+volumes:
+  amber-data:
+    name: amber-data

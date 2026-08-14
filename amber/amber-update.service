@@ -1,0 +1,23 @@
+# Runs the container update when amber-update.path sees the sentinel.
+#
+# Install to /etc/systemd/system/amber-update.service. Not enabled directly — the
+# .path unit triggers it. Watch it with:
+#   journalctl -u amber-update -f
+#
+# Runs as root because it drives docker compose and rewrites files under
+# /etc/amber-infra. It is triggered by the presence of a file that only Amber's
+# container can create, in a directory only root can write on the host side.
+
+[Unit]
+Description=Update Amber's container to the pinned image
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/amber-infra/deploy/update-amber.sh
+# The pull plus a health wait plus a possible revert. Generous, but bounded: a hung
+# registry must not leave this unit running forever and blocking the next request.
+TimeoutStartSec=900
+StandardOutput=journal
+StandardError=journal

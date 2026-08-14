@@ -1,0 +1,140 @@
+#!/usr/bin/env bash
+#
+# Postgres backups, for the first app that needs one.
+#
+# No app in the ecosystem uses Postgres today — this ships now so that the first one
+# inherits a contract instead of inventing one, and so that `secrets.yaml`'s
+# `backup.postgres` key means something the day it stops being an empty list. With
+# no targets configured it does nothing and exits 0, which is why the cron template
+# can install both scripts unconditionally.
+#
+# Same shape as backup-sqlite.sh, and the same principle: verify before keeping, a
+# retention floor, non-zero on any failure.
+#
+#   --format=custom   because it is the only format pg_restore can be selective
+#                     about later, and it compresses on the way out.
+#   --no-owner        so a restore into a fresh cluster does not fail on a role
+#   --no-privileges   that does not exist there.
+#
+# Usage:
+#   backup-postgres.sh                  back up every target
+#   backup-postgres.sh --verify-latest  restore-rehearse the newest dump per target
+#
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+. "$REPO_ROOT/install/lib/common.sh"
+. "$REPO_ROOT/install/lib/secrets.sh"
+
+LOCK=/var/lock/amber-infra-backup-pg.lock
+MODE="${1:-backup}"
+
+TARGET="$(secrets_get '.backup.target' /var/backups/amber-infra)"
+RETENTION_DAYS="$(secrets_get '.backup.retention_days' 14)"
+KEEP_MINIMUM="$(secrets_get '.backup.keep_minimum' 7)"
+RCLONE_REMOTE="$(secrets_get '.backup.rclone_remote')"
+
+failures=0
+made=0
+
+stamp() { date -u +%Y%m%dT%H%M%SZ; }
+
+backup_pg_target() {  # NAME CONTAINER DB USER
+  local name="$1" container="$2" db="$3" user="$4" out
+  out="$TARGET/pg-$name-$(stamp).dump"
+
+  if [ -n "$container" ]; then
+    if ! docker exec "$container" pg_dump \
+          --format=custom --no-owner --no-privileges -U "$user" "$db" > "$out" 2>/dev/null; then
+      warn "$name: pg_dump failed inside container '$container'"
+      rm -f "$out"; failures=$((failures + 1)); return 1
+    fi
+  else
+    if ! pg_dump --format=custom --no-owner --no-privileges -U "$user" "$db" > "$out"; then
+      warn "$name: pg_dump failed"
+      rm -f "$out"; failures=$((failures + 1)); return 1
+    fi
+  fi
+
+  # Verify before keeping. `pg_restore --list` parses the whole archive's table of
+  # contents, so a truncated or corrupt dump fails here rather than at 3am on a bad
+  # day. It needs no server.
+  if ! pg_restore --list "$out" >/dev/null 2>&1; then
+    warn "$name: the dump does not parse — not keeping it"
+    rm -f "$out"; failures=$((failures + 1)); return 1
+  fi
+
+  sha256sum "$out" | awk '{print $1}' > "$out.sha256"
+  ok "$name -> $(basename "$out") ($(du -h "$out" | cut -f1))"
+  made=$((made + 1))
+}
+
+prune() {
+  local name count
+  step "Pruning (older than ${RETENTION_DAYS}d, keeping at least $KEEP_MINIMUM per target)"
+  while IFS= read -r name; do
+    [ -z "$name" ] && continue
+    count=0
+    while IFS= read -r file; do
+      count=$((count + 1))
+      [ "$count" -le "$KEEP_MINIMUM" ] && continue
+      if [ -n "$(find "$file" -mtime "+$RETENTION_DAYS" 2>/dev/null)" ]; then
+        rm -f "$file" "$file.sha256"
+        echo "   pruned $(basename "$file")"
+      fi
+    done < <(ls -1t "$TARGET/pg-$name"-*.dump 2>/dev/null)
+  done < <(yq -r '.backup.postgres[]?.name // empty' "$SECRETS_FILE")
+}
+
+verify_latest() {
+  local name newest
+  step "Restore rehearsal"
+  while IFS= read -r name; do
+    [ -z "$name" ] && continue
+    newest="$(ls -1t "$TARGET/pg-$name"-*.dump 2>/dev/null | head -n1)"
+    if [ -z "$newest" ]; then
+      warn "$name: no dump to verify"; failures=$((failures + 1)); continue
+    fi
+    if pg_restore --list "$newest" >/dev/null 2>&1; then
+      ok "$name: $(basename "$newest") parses cleanly ($(pg_restore --list "$newest" | grep -c 'TABLE DATA') tables with data)"
+    else
+      warn "$name: $(basename "$newest") is NOT usable"
+      failures=$((failures + 1))
+    fi
+  done < <(yq -r '.backup.postgres[]?.name // empty' "$SECRETS_FILE")
+}
+
+count="$(yq -r '.backup.postgres | length' "$SECRETS_FILE" 2>/dev/null || echo 0)"
+if [ "${count:-0}" -eq 0 ]; then
+  ok "no Postgres targets configured — nothing to do"
+  exit 0
+fi
+
+have pg_dump || die "backup.postgres has targets but pg_dump is not installed (apt install postgresql-client)"
+
+exec 9>"$LOCK"
+flock -n 9 || die "another Postgres backup is already running (lock: $LOCK)"
+mkdir -p "$TARGET"
+
+case "$MODE" in
+  --verify-latest) verify_latest ;;
+  backup|"")
+    step "Backing up Postgres targets to $TARGET"
+    while IFS=$'\t' read -r name container db user; do
+      [ -z "$name" ] && continue
+      backup_pg_target "$name" "$container" "$db" "$user" || true
+    done < <(yq -r '.backup.postgres[] | [.name, (.container // ""), .database, (.user // "postgres")] | @tsv' "$SECRETS_FILE")
+    prune
+    if [ -n "$RCLONE_REMOTE" ] && have rclone; then
+      rclone copy "$TARGET" "$RCLONE_REMOTE" --max-age 48h \
+        || { warn "rclone copy failed"; failures=$((failures + 1)); }
+    fi
+    ;;
+  *) die "usage: $0 [--verify-latest]" ;;
+esac
+
+echo
+if [ "$failures" -gt 0 ]; then
+  die "$made dump(s) made, $failures failure(s)"
+fi
+ok "$made dump(s) made, no failures"

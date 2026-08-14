@@ -1,0 +1,51 @@
+# amber-infra edge config. Deployed to /etc/caddy/Caddyfile; per-app site blocks
+# live in snippets/ and are pulled in by the import at the bottom.
+#
+# Caddyfile ordering is strict and non-obvious: the global options block must come
+# first, snippet DEFINITIONS second, and site blocks last. `import` is evaluated
+# textually, so it goes at the END — a file imported before the (common) snippet is
+# defined fails to adapt with a confusing "unrecognized directive" error.
+
+{
+	email {$ACME_EMAIL}
+	# No admin API on localhost:2019. Reloads go through `caddy reload`, which is
+	# what install/lib/caddy.sh does after validating.
+	admin off
+	servers {
+		trusted_proxies static private_ranges
+	}
+}
+
+# Shared behaviour every site gets. {args[0]} is the app name, used for the log file.
+(common) {
+	encode zstd gzip
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options    "nosniff"
+		Referrer-Policy           "strict-origin-when-cross-origin"
+		-Server
+	}
+	log {
+		output file /var/log/caddy/{args[0]}.log {
+			roll_size 10MiB
+			roll_keep 5
+		}
+		format json
+	}
+}
+
+# Upstream settings for anything that streams: WebSockets, SSE, MCP streamable HTTP.
+#
+# flush_interval -1 disables response buffering. Without it Caddy holds an SSE chunk
+# until its buffer fills, which reads to a voice client as "the agent hung" — it is
+# the single most likely thing to break when Amber goes behind this proxy, because
+# her whole design streams audio sentence by sentence.
+(streaming) {
+	flush_interval -1
+	transport http {
+		read_timeout 0
+		write_timeout 0
+	}
+}
+
+import snippets/*.caddy

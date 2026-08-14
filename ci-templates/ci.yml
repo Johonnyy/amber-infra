@@ -1,0 +1,51 @@
+# Copy to .github/workflows/ci.yml in any Python repo in the ecosystem.
+#
+# Tests only. No ruff, no mypy — deliberately. No repo here has ever had lint
+# config, so introducing one means a config decision plus a cleanup backlog across
+# four working repos, and doing that inside an infrastructure change is how both
+# land badly. Add lint as its own pass, on its own merits.
+#
+# It works unmodified on all four repos today: agent-mcp-py and agent-runtime use a
+# src layout, amber and sync-store are flat, and nothing below assumes either.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      # agent-mcp-py and agent-runtime are consumed as git+https dependencies, so
+      # `pip install` needs network and git — fine while they are public. THE DAY
+      # EITHER GOES PRIVATE, uncomment this: without it pip fails with a bare
+      # exit 128 and no explanation of which repo it could not reach.
+      # - name: Authenticate to private sibling repos
+      #   run: |
+      #     git config --global url."https://x-access-token:${{ secrets.GH_PAT }}@github.com/".insteadOf "https://github.com/"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - run: pip install -e ".[dev]"
+
+      - run: pytest -q

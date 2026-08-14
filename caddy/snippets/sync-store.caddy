@@ -1,0 +1,15 @@
+# sync-store — the discovery registry and Lucidity's config sync.
+#
+# A plain JSON API: no streaming, so no (streaming) import. Registration POSTs are
+# small and the client's own timeout is 5s, so the default proxy behaviour is right.
+
+sync.johnny.dev {
+	import common sync-store
+
+	reverse_proxy 127.0.0.1:8081
+
+	# /health is unauthenticated and polled by the container healthcheck and by
+	# install.sh. Logging every probe drowns the registrations that matter.
+	@health path /health
+	log_skip @health
+}

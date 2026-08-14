@@ -1,0 +1,202 @@
+#!/usr/bin/env bash
+#
+# SQLite (and Docker volume) backups for every target in secrets.yaml.
+#
+# THE LOAD-BEARING DETAIL: `cp` of a WAL-mode SQLite file is a corrupt snapshot.
+# Both databases here are WAL — amber.db has three co-tenant writers (Amber's memory
+# store, agent_mcp_usage, agent_runtime_usage), and sync-store's is WAL too. A plain
+# copy catches the main file mid-transaction with the committed data still sitting
+# in a -wal file you did not copy. `sqlite3 .backup` uses the online backup API and
+# takes a consistent snapshot of a live database.
+#
+# Everything else here follows from one principle: a backup you have never restored
+# is not a backup. So every snapshot is integrity-checked before it is kept, the
+# weekly rehearsal actually restores the newest one, and any failure exits non-zero
+# — a silent backup failure is the default failure mode of every backup system ever
+# written.
+#
+# Usage:
+#   backup-sqlite.sh                 back up every target
+#   backup-sqlite.sh --verify-latest restore-rehearse the newest snapshot per target
+#   backup-sqlite.sh --list          what is on disk
+#
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+. "$REPO_ROOT/install/lib/common.sh"
+. "$REPO_ROOT/install/lib/secrets.sh"
+
+LOCK=/var/lock/amber-infra-backup.lock
+MODE="${1:-backup}"
+
+TARGET="$(secrets_get '.backup.target' /var/backups/amber-infra)"
+RETENTION_DAYS="$(secrets_get '.backup.retention_days' 14)"
+KEEP_MINIMUM="$(secrets_get '.backup.keep_minimum' 7)"
+RCLONE_REMOTE="$(secrets_get '.backup.rclone_remote')"
+
+failures=0
+made=0
+
+stamp() { date -u +%Y%m%dT%H%M%SZ; }
+
+# --- snapshot one sqlite database -------------------------------------------
+
+backup_sqlite_target() {  # backup_sqlite_target NAME [--container C] PATH
+  local name="$1" container="$2" path="$3"
+  local tmp out
+  tmp="$(mktemp /tmp/amber-backup-XXXXXX.db)"
+  out="$TARGET/$name-$(stamp).db.gz"
+
+  if [ -n "$container" ]; then
+    # .backup runs INSIDE the container, against the live file, then we copy the
+    # consistent snapshot out. Every image in this repo ships sqlite3 for this.
+    if ! docker exec "$container" sqlite3 "$path" ".backup '/tmp/amber-snap.db'" 2>/dev/null; then
+      warn "$name: sqlite3 .backup failed inside container '$container'"
+      rm -f "$tmp"; failures=$((failures + 1)); return 1
+    fi
+    docker cp "$container:/tmp/amber-snap.db" "$tmp" >/dev/null
+    docker exec "$container" rm -f /tmp/amber-snap.db || true
+  else
+    [ -f "$path" ] || { warn "$name: no database at $path"; rm -f "$tmp"; failures=$((failures + 1)); return 1; }
+    if ! sqlite3 "$path" ".backup '$tmp'"; then
+      warn "$name: sqlite3 .backup failed for $path"
+      rm -f "$tmp"; failures=$((failures + 1)); return 1
+    fi
+  fi
+
+  # Verify BEFORE keeping. The cheapest available proxy for "would this restore".
+  if [ "$(sqlite3 "$tmp" 'PRAGMA integrity_check' | head -n1)" != "ok" ]; then
+    warn "$name: integrity_check FAILED on the snapshot — not keeping it"
+    rm -f "$tmp"; failures=$((failures + 1)); return 1
+  fi
+
+  gzip -9 -c "$tmp" > "$out"
+  rm -f "$tmp"
+  sha256sum "$out" | awk '{print $1}' > "$out.sha256"
+  ok "$name -> $(basename "$out") ($(du -h "$out" | cut -f1))"
+  made=$((made + 1))
+}
+
+# --- snapshot one docker volume ---------------------------------------------
+
+backup_volume() {  # backup_volume NAME
+  local name="$1" out
+  out="$TARGET/volume-$name-$(stamp).tgz"
+  if ! docker volume inspect "$name" >/dev/null 2>&1; then
+    warn "volume $name does not exist — skipping"
+    return 0
+  fi
+  if ! docker run --rm -v "$name":/src:ro -v "$TARGET":/out alpine \
+        tar czf "/out/$(basename "$out")" -C /src . 2>/dev/null; then
+    warn "volume $name: tar failed"
+    failures=$((failures + 1)); return 1
+  fi
+  sha256sum "$out" | awk '{print $1}' > "$out.sha256"
+  ok "volume $name -> $(basename "$out")"
+  made=$((made + 1))
+}
+
+# --- retention ---------------------------------------------------------------
+
+prune() {
+  # Delete by age, but never fall below keep_minimum newest per prefix. A two-week
+  # outage must not leave you with zero backups because everything aged out while
+  # nobody was making new ones.
+  local prefix count
+  step "Pruning (older than ${RETENTION_DAYS}d, keeping at least $KEEP_MINIMUM per target)"
+  while IFS= read -r prefix; do
+    [ -z "$prefix" ] && continue
+    count=0
+    while IFS= read -r file; do
+      count=$((count + 1))
+      if [ "$count" -le "$KEEP_MINIMUM" ]; then
+        continue
+      fi
+      if [ -n "$(find "$file" -mtime "+$RETENTION_DAYS" 2>/dev/null)" ]; then
+        rm -f "$file" "$file.sha256"
+        echo "   pruned $(basename "$file")"
+      fi
+    done < <(ls -1t "$TARGET/$prefix"-*.gz "$TARGET/$prefix"-*.tgz 2>/dev/null)
+  done < <(ls -1 "$TARGET" 2>/dev/null | sed -E 's/-[0-9]{8}T[0-9]{6}Z\.(db\.gz|tgz)(\.sha256)?$//' | sort -u)
+}
+
+# --- restore rehearsal -------------------------------------------------------
+
+verify_latest() {
+  # The only step that proves the daily runs are worth anything: actually restore
+  # the newest snapshot and check it. Runs weekly from the cron template.
+  local name newest tmp
+  step "Restore rehearsal"
+  while IFS= read -r name; do
+    [ -z "$name" ] && continue
+    newest="$(ls -1t "$TARGET/$name"-*.db.gz 2>/dev/null | head -n1)"
+    if [ -z "$newest" ]; then
+      warn "$name: no snapshot to verify"
+      failures=$((failures + 1)); continue
+    fi
+    tmp="$(mktemp /tmp/amber-verify-XXXXXX.db)"
+    gunzip -c "$newest" > "$tmp"
+    if [ "$(sqlite3 "$tmp" 'PRAGMA integrity_check' | head -n1)" = "ok" ]; then
+      ok "$name: $(basename "$newest") restores cleanly ($(sqlite3 "$tmp" \
+          "SELECT count(*) FROM sqlite_master WHERE type='table'") tables)"
+    else
+      warn "$name: $(basename "$newest") FAILED to restore — this backup is not usable"
+      failures=$((failures + 1))
+    fi
+    rm -f "$tmp"
+  done < <(yq -r '.backup.sqlite[].name' "$SECRETS_FILE")
+}
+
+# --- main --------------------------------------------------------------------
+
+exec 9>"$LOCK"
+# A slow run and the next cron tick must never overlap on the same target dir.
+flock -n 9 || die "another backup is already running (lock: $LOCK)"
+
+mkdir -p "$TARGET"
+
+case "$MODE" in
+  --list)
+    ls -lht "$TARGET" | head -n 40
+    exit 0
+    ;;
+  --verify-latest)
+    verify_latest
+    ;;
+  backup|"")
+    step "Backing up SQLite targets to $TARGET"
+    while IFS=$'\t' read -r name container path; do
+      [ -z "$name" ] && continue
+      backup_sqlite_target "$name" "$container" "$path" || true
+    done < <(yq -r '.backup.sqlite[] | [.name, (.container // ""), .path] | @tsv' "$SECRETS_FILE")
+
+    while IFS= read -r volume; do
+      [ -z "$volume" ] && continue
+      backup_volume "$volume" || true
+    done < <(yq -r '.backup.volumes[]? // empty' "$SECRETS_FILE")
+
+    prune
+
+    if [ -n "$RCLONE_REMOTE" ]; then
+      step "Copying offsite to $RCLONE_REMOTE"
+      if have rclone; then
+        rclone copy "$TARGET" "$RCLONE_REMOTE" --max-age 48h \
+          || { warn "rclone copy failed"; failures=$((failures + 1)); }
+      else
+        warn "rclone_remote is set but rclone is not installed"
+        failures=$((failures + 1))
+      fi
+    fi
+    ;;
+  *)
+    die "usage: $0 [--verify-latest|--list]"
+    ;;
+esac
+
+echo
+if [ "$failures" -gt 0 ]; then
+  # Non-zero so cron mails it and so install.sh's "run one now to prove it works"
+  # actually proves something.
+  die "$made snapshot(s) made, $failures failure(s)"
+fi
+ok "$made snapshot(s) made, no failures"
