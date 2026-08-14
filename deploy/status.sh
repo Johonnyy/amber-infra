@@ -94,17 +94,34 @@ fi
 
 # Which values are still placeholders, split by who can fill them.
 #
-# `CHANGEME-openssl-rand-hex-32` says so in the value: any of those can be generated
-# here. A bare `CHANGEME` is an API key or a credential only its owner has. Splitting
-# them is what lets a setup screen say "press this" for one group and "go and get
-# these" for the other, rather than showing one undifferentiated list of 9 things.
+# Generatable, because nothing outside this box constrains the value:
+#
+#   * `CHANGEME-openssl-rand-hex-32` — the placeholder text is the recipe;
+#   * a bare `CHANGEME` inside a `*_KEYS` value — those are bearer tokens other
+#     agents present to this app's MCP server, and `agent_mcp.parse_keys` takes any
+#     string after the `name:`. They are not spelled with the `-openssl-` suffix only
+#     because the value is a compound `name:tok,name:tok` string.
+#
+# Everything else is an API key whose value exists somewhere else in the world.
+#
+# The split is what lets a setup screen offer a button for one group and a shopping
+# list for the other, instead of one undifferentiated list of nine things. It also
+# stops a `*_KEYS` placeholder being mistaken for something a human must supply and
+# therefore left in place — `secrets_render_env` does not check for placeholders, so
+# that word ends up mounted as a live bearer token on a public endpoint.
 PLACEHOLDERS_GEN='[]'
 PLACEHOLDERS_MANUAL='[]'
 if [ "$SECRETS_READABLE" = "true" ] && have jq; then
-  ALL_PATHS="$(yq -o=json '.' "$SECRETS_FILE" 2>/dev/null \
+  SECRETS_JSON="$(yq -o=json '.' "$SECRETS_FILE" 2>/dev/null || echo '{}')"
+  ALL_PATHS="$(printf '%s' "$SECRETS_JSON" \
     | jq -c '[paths(type == "string" and test("CHANGEME")) | join(".")]' 2>/dev/null || echo '[]')"
-  GEN_PATHS="$(yq -o=json '.' "$SECRETS_FILE" 2>/dev/null \
-    | jq -c '[paths(type == "string" and test("CHANGEME-openssl-rand-hex")) | join(".")]' 2>/dev/null || echo '[]')"
+  # Decided on the value for the first kind and on the last path segment for the
+  # second, so `apps.amber.env.AMBER_MCP_KEYS` is recognised wherever it appears.
+  GEN_PATHS="$(printf '%s' "$SECRETS_JSON" | jq -c '
+      [paths(type == "string" and test("CHANGEME")) as $p
+       | select((getpath($p) | test("CHANGEME-openssl-rand-hex"))
+                or ($p[-1] | tostring | test("_KEYS$")))
+       | $p | join(".")]' 2>/dev/null || echo '[]')"
   PLACEHOLDERS_GEN="$GEN_PATHS"
   PLACEHOLDERS_MANUAL="$(printf '%s' "$ALL_PATHS" | jq -c --argjson gen "$GEN_PATHS" '. - $gen')"
 fi
