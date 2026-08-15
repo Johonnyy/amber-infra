@@ -282,6 +282,36 @@ else
   note "docker is not installed on this box."
 fi
 
+# ==== host-side leftovers ====================================================
+# What a box carries from before it was containerised.
+#
+# This repo assumes it owns 80, 443 and each app's loopback port, and a Caddy or an
+# Amber installed straight onto the host owns them first. install.sh refuses in that
+# situation — correctly — but a refusal several minutes into a run is a poor way to
+# learn something that was knowable at a glance. Reported here so it can be said up
+# front instead.
+
+port_holder() {  # port_holder PORT -> the process holding it, or ""
+  ss -lntp 2>/dev/null | awk -v p=":$1" '$4 ~ p" *$" {print $NF}' | head -n1 || true
+}
+
+HOST_UNITS='[]'
+if have systemctl; then
+  HOST_UNITS="$(systemctl list-unit-files --type=service --no-legend --no-pager 2>/dev/null \
+    | awk '{print $1}' | sed 's/\.service$//' \
+    | grep -xE 'amber|caddy|sync-store' | sort -u | jq -Rn '[inputs]' 2>/dev/null || echo '[]')"
+fi
+
+CADDY_CONTAINER=false
+if [ "$(container_state caddy)" = "running" ]; then CADDY_CONTAINER=true; fi
+
+HOST_SERVICES="$(jq -n \
+  --argjson port80  "$(jnul "$(port_holder 80)")" \
+  --argjson port443 "$(jnul "$(port_holder 443)")" \
+  --argjson caddyContainer "$CADDY_CONTAINER" \
+  --argjson units "$HOST_UNITS" \
+  '{port80: $port80, port443: $port443, caddyContainer: $caddyContainer, units: $units}')"
+
 # ==== the edge ===============================================================
 
 CADDY_STATE="$(docker inspect -f '{{.State.Status}}' caddy 2>/dev/null || echo missing)"
@@ -334,6 +364,7 @@ jq -n \
   --argjson placeholdersGen "$PLACEHOLDERS_GEN" \
   --argjson placeholdersManual "$PLACEHOLDERS_MANUAL" \
   --argjson acmeEmailSet    "$ACME_SET" \
+  --argjson hostServices    "$HOST_SERVICES" \
   --argjson settings        "$(jq -n \
       --argjson acmeEmail     "$(jnul "$ACME_EMAIL")" \
       --argjson primaryDomain "$(jnul "$(sget '.infra.primary_domain')")" \
@@ -360,7 +391,7 @@ jq -n \
   --argjson warnings        "$WARNINGS" \
   '{
      installed: true,
-     schema: 3,
+     schema: 4,
      repoRoot: $repoRoot, commit: $commit, role: $role, primaryDomain: $primaryDomain,
      docker: $docker, compose: $compose,
      tools: $tools,
@@ -370,6 +401,7 @@ jq -n \
        placeholders: { generatable: $placeholdersGen, manual: $placeholdersManual }
      },
      settings: $settings,
+     hostServices: $hostServices,
      secretsReadable: $secretsReadable,
      apps: $apps,
      caddy: { running: ($caddyState == "running"), health: $caddyHealth, sites: $caddySites },
