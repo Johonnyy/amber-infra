@@ -139,6 +139,31 @@ fi
 ACME_EMAIL="$(sget '.infra.acme_email')"
 case "$ACME_EMAIL" in ''|*example.com) ACME_SET=false ;; *) ACME_SET=true ;; esac
 
+# The domain is written down in three places and they must agree.
+#
+# `infra.primary_domain` is the apex, `sync_store.url` is what every app is told to
+# register against, and each `apps.*.domain` is what Caddy requests a certificate for.
+# Nothing derives one from another, so updating the apex and stopping there leaves two
+# stale hostnames — and both fail quietly rather than loudly: the certificate is for a
+# name you do not own, and discovery points at a host nobody is listening on.
+PRIMARY="$(sget '.infra.primary_domain')"
+if [ -n "$PRIMARY" ] && [ "$SECRETS_READABLE" = "true" ]; then
+  EXPECTED_SYNC="https://sync.$PRIMARY"
+  ACTUAL_SYNC="$(sget '.sync_store.url')"
+  if [ -n "$ACTUAL_SYNC" ] && [ "$ACTUAL_SYNC" != "$EXPECTED_SYNC" ]; then
+    note "sync_store.url is $ACTUAL_SYNC but install.sh serves the store at $EXPECTED_SYNC. Apps will register against a host that is not being served."
+  fi
+  while IFS= read -r _app; do
+    [ -n "$_app" ] || continue
+    _dom="$(sget ".apps.\"$_app\".domain")"
+    [ -n "$_dom" ] || continue
+    case "$_dom" in
+      *".$PRIMARY") ;;
+      *) note "apps.$_app.domain is $_dom, which is not under $PRIMARY. If the apex was changed without updating this, Caddy will request a certificate for a name you do not own." ;;
+    esac
+  done < <(yq -r '.apps // {} | keys | .[]' "$SECRETS_FILE" 2>/dev/null || true)
+fi
+
 # ==== the registry ===========================================================
 # Queried once with amber's key; every app's registration state is then read out of
 # this one response rather than re-fetched per app.
