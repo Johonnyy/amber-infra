@@ -208,6 +208,30 @@ if [ -z "$PREFIX" ]; then
   [ "$APP" = "amber" ] && PREFIX="AMBER_MCP"
 fi
 PREFIX="${PREFIX%_}"
+
+# Cross-check the prefix against the keys the app was actually declared with, and
+# stop rather than deploy something that cannot work.
+#
+# The silent failure this catches: a stanza written with AGENT_MCP_KEYS for an app
+# that reads BLOOM_MCP_* gets no bearer keys, so its MCP server is never mounted, and
+# no public URL, so it never registers. It installs, it starts, it serves, and the
+# only symptom is the word "unregistered" in a status report days later. Better to
+# refuse here, where the fix is one line away.
+if ! secrets_get ".apps.\"$APP\".env | keys | .[]" | grep -q "^${PREFIX}_"; then
+  DECLARED="$(secrets_get ".apps.\"$APP\".env | keys | .[]" | tr '
+' ' ')"
+  die "'$APP' is declared with env keys that do not match its prefix.
+
+     env_prefix resolves to ${PREFIX}, so this app reads ${PREFIX}_* — but its env
+     block holds: ${DECLARED:-(nothing)}
+
+     Keys under any other prefix are silently ignored: the app would start, serve,
+     never mount its MCP server and never register, with nothing saying why.
+
+     Fix apps.$APP in $SECRETS_FILE — set env_prefix, and name its keys to match
+     (e.g. ${PREFIX}_KEYS) — then re-run this command."
+fi
+
 env_set "$ENV_FILE" "${PREFIX}_PUBLIC_URL" "https://$DOMAIN"
 env_set "$ENV_FILE" "${PREFIX}_SYNC_STORE_URL" "$SYNC_URL"
 env_set "$ENV_FILE" "${PREFIX}_SYNC_STORE_TOKEN" "$APP_TOKEN"
