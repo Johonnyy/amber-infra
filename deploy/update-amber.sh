@@ -81,7 +81,19 @@ rm -f "$EXAMPLE"
 
 # The one check update.sh made that has no container equivalent: refuse to restart
 # into a broken configuration rather than discovering it from a silent service.
-env_require "$ENV_FILE" AMBER_OPENAI_API_KEY
+#
+# The brain's key belongs here as much as the OpenAI one, and was missed: nothing
+# validates it. `secrets_render_env` copies `.apps.amber.env` verbatim, so a
+# `CHANGEME` reaches the container as a real key, and `env_reconcile` adds the
+# key from the image's example as the literal `sk-or-...`. Either way OpenRouter
+# answers a 401 that reads like an outage. `env_require` already rejects unset,
+# CHANGEME and `...` alike, so naming the key here covers all three.
+AMBER_LLM_OFF="$(env_get "$ENV_FILE" AMBER_FEATURE_LLM 2>/dev/null | tr '[:upper:]' '[:lower:]' || true)"
+if [ "$AMBER_LLM_OFF" = "false" ]; then
+  env_require "$ENV_FILE" AMBER_OPENAI_API_KEY
+else
+  env_require "$ENV_FILE" AMBER_OPENAI_API_KEY AMBER_OPENROUTER_API_KEY
+fi
 
 # 3. Pull and restart on the pinned tag. `pull` on an exact tag is a no-op unless
 #    the tag was force-pushed, which is exactly the semantics we want: an update
