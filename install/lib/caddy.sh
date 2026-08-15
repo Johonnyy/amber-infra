@@ -47,11 +47,15 @@ ensure_caddy() {  # ensure_caddy ACME_EMAIL
   run bash -c "printf 'ACME_EMAIL=%s\n' '$acme_email' > '$CADDY_DIR/.env'"
   run chmod 600 "$CADDY_DIR/.env"
 
-  if [ "$(container_health caddy)" = "missing" ]; then
-    compose_up "$CADDY_DIR"
-  else
-    ok "caddy already running"
+  # The condition is "is the container RUNNING", not "does something called caddy
+  # exist". Both branches below reach it with `docker exec`, which needs a running
+  # container — a stopped one, or an image of the same name, made this take the
+  # reload path and fail with a raw daemon error.
+  if [ "$(container_state caddy)" = "running" ]; then
+    ok "caddy container already running"
     caddy_validate && caddy_reload
+  else
+    compose_up "$CADDY_DIR"
   fi
 }
 

@@ -73,9 +73,21 @@ compose_up() {  # compose_up DIR
   compose "$dir" up -d
 }
 
+# `docker container inspect`, never bare `docker inspect`.
+#
+# Bare `inspect` is polymorphic: it resolves containers, images, networks and volumes
+# from the same namespace. So on a box where the `caddy` IMAGE has been pulled but no
+# container exists, `docker inspect caddy` SUCCEEDS, `.State` is absent, and this
+# reports "none" — which every caller reads as "exists, just has no healthcheck".
+# ensure_caddy then took its already-running branch and ran `docker exec caddy`, which
+# failed with "No such container: caddy" and took the install down with it.
 container_health() {  # container_health NAME -> healthy|unhealthy|starting|none|missing
-  docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' \
+  docker container inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' \
     "$1" 2>/dev/null || echo missing
+}
+
+container_state() {  # container_state NAME -> running|exited|created|paused|missing
+  docker container inspect -f '{{.State.Status}}' "$1" 2>/dev/null || echo missing
 }
 
 wait_healthy() {  # wait_healthy NAME TIMEOUT_S
@@ -93,7 +105,7 @@ wait_healthy() {  # wait_healthy NAME TIMEOUT_S
       none)    warn "$name declares no healthcheck — treating 'running' as good enough"
                [ "$(docker inspect -f '{{.State.Running}}' "$name" 2>/dev/null)" = "true" ] && return 0
                ;;
-      missing) warn "$name does not exist yet" ;;
+      missing) warn "$name does not exist as a container yet" ;;
     esac
     sleep 3
     waited=$((waited + 3))

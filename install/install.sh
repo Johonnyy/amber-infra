@@ -114,6 +114,7 @@ case "$IMAGE" in
 esac
 
 preflight_ports
+preflight_upstream "$APP" "$UPSTREAM"
 preflight_dns "$DOMAIN"
 
 # ==== 2. TLS edge ============================================================

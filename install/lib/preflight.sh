@@ -12,6 +12,9 @@
 _AMBER_INFRA_PREFLIGHT=1
 
 . "$(dirname "${BASH_SOURCE[0]}")/common.sh"
+# preflight_ports needs container_state to tell our containerised edge apart from a
+# Caddy installed on the host — both are just "caddy" in ss output.
+. "$(dirname "${BASH_SOURCE[0]}")/docker.sh"
 
 preflight_system() {
   step "Preflight"
@@ -30,20 +33,73 @@ preflight_system() {
 }
 
 preflight_ports() {
-  # Only Caddy may hold 80/443. Anything else there means an nginx or an Apache
+  # Only *our* Caddy may hold 80/443. Anything else there means an nginx or an Apache
   # nobody remembered, and Caddy would fail to bind with a much less obvious error.
+  #
+  # The process name alone cannot settle it. The edge runs with `network_mode: host`,
+  # so a containerised Caddy and one installed straight onto the box are both just
+  # `caddy` in `ss` output — and accepting the name was how a host Caddy sailed
+  # through this check and then blocked the container from ever binding. The question
+  # that actually distinguishes them is whether our *container* is running.
   local port holder
   for port in 80 443; do
-    holder="$(ss -lntp 2>/dev/null | awk -v p=":$port" '$4 ~ p" *$" {print $NF}' | head -n1)"
-    if [ -n "$holder" ]; then
-      case "$holder" in
-        *caddy*|*docker*) ok "port $port held by the edge ($holder)" ;;
-        *) die "port $port is already held by $holder — stop it before installing the Caddy edge" ;;
-      esac
-    else
+    holder="$(ss -lntp 2>/dev/null | awk -v p=":$port" '$4 ~ p" *$" {print $NF}' | head -n1 || true)"
+    if [ -z "$holder" ]; then
       ok "port $port free"
+      continue
     fi
+    case "$holder" in
+      *caddy*|*docker*)
+        if [ "$(container_state caddy)" = "running" ]; then
+          ok "port $port held by the containerised edge ($holder)"
+        else
+          die "port $port is held by $holder, but there is no running 'caddy' container.
+     That is a Caddy installed directly on this box. The edge here runs with
+     network_mode: host and cannot bind a port the host copy already owns.
+
+     Stop and disable the host one first:
+         systemctl disable --now caddy
+
+     Its config is /etc/caddy/Caddyfile, which this repo overwrites — copy anything
+     you still need out of it before you do."
+        fi
+        ;;
+      *) die "port $port is already held by $holder — stop it before installing the Caddy edge" ;;
+    esac
   done
+}
+
+preflight_upstream() {  # preflight_upstream APP HOST:PORT
+  # The app's own loopback port, checked for the same reason as 80/443 and missed for
+  # longer: this repo containerises services that already exist on the box as systemd
+  # units. Amber is the case that matters — `amber.service` binds 127.0.0.1:8000, and
+  # the container wants the same port. Without this, `docker compose up` fails with a
+  # bind error several minutes into an install that has already rewritten the firewall
+  # and the TLS edge.
+  local app="$1" port holder
+  port="${2##*:}"
+  case "$port" in ''|*[!0-9]*) return 0 ;; esac
+
+  holder="$(ss -lntp 2>/dev/null | awk -v p=":$port" '$4 ~ p" *$" {print $NF}' | head -n1 || true)"
+  if [ -z "$holder" ]; then
+    ok "upstream port $port free"
+    return 0
+  fi
+  if [ "$(container_state "$app")" = "running" ]; then
+    ok "upstream port $port held by the $app container"
+    return 0
+  fi
+
+  die "upstream port $port is held by $holder, and the '$app' container is not running.
+     Something else on this box is already serving there — most often an earlier,
+     non-containerised deployment of the same app.
+
+     For Amber that is the systemd unit from amber_v2/deploy. Move her database onto
+     the container volume FIRST, because the container will not find it otherwise:
+         sudo bash $REPO_ROOT/deploy/migrate-amber-db.sh --dry-run
+         sudo bash $REPO_ROOT/deploy/migrate-amber-db.sh
+     That script stops the unit and leaves it installed, which is your rollback
+     (systemctl start amber). Then re-run this install."
 }
 
 preflight_dns() {  # preflight_dns DOMAIN
@@ -60,9 +116,15 @@ preflight_dns() {  # preflight_dns DOMAIN
 
   public="$(curl -fsS --max-time 5 https://api.ipify.org 2>/dev/null || true)"
   if [ -n "$public" ] && [ "$resolved" != "$public" ]; then
-    warn "$domain resolves to $resolved but this box's public IP looks like $public.
-     ACME will fail unless the domain points here. Continuing anyway — a proxy or
-     a split-horizon DNS setup can legitimately look like this."
+    warn "$domain resolves to $resolved but this box's public IP is $public.
+
+     Unless a proxy or split-horizon DNS explains that — which is the only reason this
+     is a warning and not a refusal — the A record is simply wrong, and ACME will fail
+     every time Caddy retries. Let's Encrypt rate-limits failures per domain, so the
+     cost of continuing is not one failed install, it is an hour of not being able to
+     try again.
+
+     Fix the A record to point at $public, then re-run. Continuing anyway."
   else
     ok "$domain resolves to $resolved"
   fi
