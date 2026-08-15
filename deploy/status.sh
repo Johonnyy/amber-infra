@@ -377,6 +377,16 @@ manifest_json() {  # manifest_json NAME
     envPrefix: ((.env_prefix // "") | sub("_$"; "")),
     role:      (.role // null),
     release:   (if .release then {repo: (.release.repo // null), package: (.release.package // null)} else null end),
+    # Keys declared by PATTERN rather than by name: the per-provider OAuth client
+    # credentials, whose set is a directory of TOMLs inside the image. Emitted so the
+    # GUI can offer to add one without this repo having heard of that provider.
+    # (No apostrophes in here — the whole jq program is a single-quoted shell string.)
+    dynamicKeys: [ (.dynamic_keys // [])[] | {
+      prefix:   .prefix,
+      label:    (.label // .prefix),
+      discover: (.discover // null),
+      why:      (.why // null)
+    } ],
     keys: [ (.keys // [])[] | {
       name:       .name,
       # An unknown kind degrades rather than throws: a box reading a newer manifest

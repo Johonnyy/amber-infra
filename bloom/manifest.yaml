@@ -79,22 +79,31 @@ keys:
   - { name: BLOOM_DB_PATH,       kind: config, default: /data/bloom.db }
   - { name: BLOOM_FEATURE_OAUTH, kind: config, default: "true" }
 
-  # --- per-provider OAuth credentials -------------------------------------------
-  # Named by each manifest in bloom/app/providers/*.toml rather than by the BLOOM_
-  # prefix, because the set of providers is not known when the settings class is
-  # defined. Optional, and declared here only so the checklist can offer them as a
-  # group and the vault can fill them.
-  - name: BLOOM_OAUTH_SPOTIFY_CLIENT_ID
-    kind: supplied
-    credential: spotify-client-id
-    label: Spotify client ID
-    help_url: https://developer.spotify.com/dashboard
-    required: false
-    group: spotify
-  - name: BLOOM_OAUTH_SPOTIFY_CLIENT_SECRET
-    kind: supplied
-    credential: spotify-client-secret
-    label: Spotify client secret
-    help_url: https://developer.spotify.com/dashboard
-    required: false
-    group: spotify
+
+# Credentials whose *set* is not known when this file is written.
+#
+# Bloom's providers are one TOML each in `app/providers/`, and adding one is meant to
+# be that file and nothing else anywhere — no Python, no new tools, and emphatically no
+# amber-infra release. Spotify's client id and secret were listed above as `supplied`
+# keys, which quietly undid that: every connection you ever wanted would have needed an
+# entry here first, and a deploy of this repo to go with it.
+#
+# So the *pattern* is declared instead of the members. Two consumers read it:
+#
+#   * install.sh, which needs to know that a key under this prefix is legitimate rather
+#     than an orphan wearing the wrong prefix — the check that would otherwise refuse
+#     BLOOM_OAUTH_GOOGLE_CLIENT_ID as a mistake;
+#   * Aperture, which asks the running Bloom for its providers
+#     (`GET /admin/oauth/providers`, which reports `client_id_env` and
+#     `client_secret_env` per provider) and offers to fill whichever are unconfigured.
+#
+# Nothing here has to change when a provider is added. That is the whole point.
+dynamic_keys:
+  - prefix: BLOOM_OAUTH_
+    label: OAuth client credentials
+    # How Aperture finds the live list. The only value this repo understands today;
+    # an app with a different discovery route declares a different one.
+    discover: bloom-oauth-providers
+    why: >
+      One pair per connected service, named by that provider's own manifest. Get them
+      from the provider's developer console — Bloom never invents them.

@@ -157,6 +157,32 @@ manifest_names_of_kind() {  # manifest_names_of_kind APP EXTENDED_REGEX
   manifest_rows "$1" | awk -F'\t' -v re="$2" '$2 ~ re { print $1 }'
 }
 
+#: The prefixes under which an app accepts keys this file cannot name.
+#:
+#: Bloom's OAuth client credentials are one pair per connected service, and the set of
+#: services is a directory of TOMLs inside the image — so enumerating them here would
+#: mean an amber-infra release for every connection you ever add. Declaring the prefix
+#: instead keeps the orphan check meaningful (a key under no known prefix is still a
+#: mistake) without it refusing a provider that was added after this file was written.
+manifest_dynamic_prefixes() {  # manifest_dynamic_prefixes APP
+  local path
+  path="$(manifest_path "$1")"
+  [ -n "$path" ] || return 0
+  # `.dynamic_keys[].prefix`, not `[]? … // empty`: yq v4 has no `empty` (jq does,
+  # which is why status.sh can spell this differently), and a missing block already
+  # yields nothing here rather than an error.
+  yq -r '.dynamic_keys[].prefix' "$path" 2>/dev/null || true
+}
+
+manifest_is_dynamic() {  # manifest_is_dynamic APP KEY
+  local prefix
+  while IFS= read -r prefix; do
+    [ -z "$prefix" ] && continue
+    case "$2" in "$prefix"*) return 0 ;; esac
+  done < <(manifest_dynamic_prefixes "$1")
+  return 1
+}
+
 #: The `peers` list on a `generated:token` key — the callers this app expects to hear
 #: from, which become the `name:` halves of its compound bearer list. A list rather
 #: than a scalar, so it is the one field that cannot live in the flat row above; read
@@ -234,6 +260,10 @@ manifest_check() {  # manifest_check APP SECRETS_FILE
   while IFS= read -r name; do
     [ -z "$name" ] && continue
     manifest_has_key "$app" "$name" && continue
+    # Declared by pattern rather than by name — a provider added after this manifest
+    # was written. Legitimate, and silent: warning on every connection you add would
+    # train you to ignore this whole category of warning.
+    manifest_is_dynamic "$app" "$name" && continue
     suffix="${name#*_}"
     match=""
     [ "$suffix" != "$name" ] && match="$(manifest_key_names "$app" | grep -E "_${suffix}\$" | head -n1 || true)"
@@ -336,6 +366,24 @@ manifest_lint() {  # manifest_lint APP
       "$app/manifest.yaml: source '${src%%:*}' is declared as '$got', but env_prefix is '$prefix' so it must be '${prefix}_${suffix}'"
   done
 
+  # 3b. The dynamic block, if there is one.
+  #
+  # Two ways it can be quietly wrong. A prefix that is not really a prefix
+  # ("BLOOM_OAUTH" with no trailing underscore) still matches, but sloppily. And a
+  # prefix outside the app's own namespace would make the orphan check accept another
+  # app's keys as legitimate — switching off the exact guard all of this exists for,
+  # in the one place nobody would think to look.
+  local ns="${prefix%%_*}" dyn
+  while IFS= read -r dyn; do
+    [ -z "$dyn" ] && continue
+    grep -qE '^[A-Z][A-Z0-9_]*_$' <<<"$dyn" || _lint_fail \
+      "$app/manifest.yaml: dynamic_keys prefix '$dyn' should end in _ and look like BLOOM_OAUTH_"
+    case "$dyn" in
+      "${ns}"_*) ;;
+      *) _lint_fail "$app/manifest.yaml: dynamic_keys prefix '$dyn' is outside this app's namespace (${ns}_), so it would accept another app's keys as legitimate" ;;
+    esac
+  done < <(manifest_dynamic_prefixes "$app")
+
   while IFS= read -r name; do
     [ -z "$name" ] && continue
 
@@ -380,8 +428,9 @@ manifest_lint() {  # manifest_lint APP
 
   while IFS= read -r name; do
     [ -z "$name" ] && continue
-    manifest_has_key "$app" "$name" \
-      || _lint_fail "secrets.example.yaml: apps.$app.env.$name is not declared in $app/manifest.yaml"
+    manifest_has_key "$app" "$name" && continue
+    manifest_is_dynamic "$app" "$name" && continue
+    _lint_fail "secrets.example.yaml: apps.$app.env.$name is not declared in $app/manifest.yaml"
   done <<<"$declared"
 
   while IFS= read -r name; do
