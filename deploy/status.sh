@@ -329,12 +329,25 @@ DNS_RECORDS="$(dns_json)"
 # caddy and sync-store are excluded: they are the edge and the registry, brought up by
 # ensure_caddy and ensure_sync_store, and `install.sh --app sync-store` is not a thing.
 
+#: Not apps. The edge and the registry are brought up by ensure_caddy and
+#: ensure_sync_store as part of installing whatever app you asked for; there is no
+#: `install.sh --app sync-store`, their config lives under `caddy:`/`sync_store:`
+#: rather than `apps:`, and neither is an MCP server so neither ever registers.
+#:
+#: Listing them as apps is not cosmetic. The card offers Rename, Roll back and
+#: "Save domain" — and those write to `apps.sync-store.*`, which nothing reads.
+INFRA_SERVICES="caddy sync-store"
+
+is_infra_service() {  # is_infra_service NAME
+  case " $INFRA_SERVICES " in *" $1 "*) return 0 ;; *) return 1 ;; esac
+}
+
 catalogue_json() {
   local dir name compose image upstream
   for dir in "$REPO_ROOT"/*/; do
     [ -d "$dir" ] || continue
     name="$(basename "$dir")"
-    case "$name" in caddy|sync-store) continue ;; esac
+    is_infra_service "$name" && continue
     compose="${dir}docker-compose.prod.yml"
     [ -f "$compose" ] || continue
     image="$(image_of "$compose")"
@@ -359,13 +372,19 @@ app_names() {
   # alone: inherited from an old example, stood up by hand, or shipped in the repo
   # and not installed yet.
   if [ "$SECRETS_READABLE" = "true" ]; then
-    yq -r '.apps // {} | keys | .[]' "$SECRETS_FILE" 2>/dev/null || true
+    yq -r '.apps // {} | keys | .[]' "$SECRETS_FILE" 2>/dev/null | while IFS= read -r _n; do
+      is_infra_service "$_n" || printf '%s
+' "$_n"
+    done
   fi
-  local dir
+  local dir name
   for dir in "$ETC"/*/; do
     [ -d "$dir" ] || continue
     [ -e "${dir}docker-compose.prod.yml" ] || continue
-    basename "$dir"
+    name="$(basename "$dir")"
+    is_infra_service "$name" && continue
+    printf '%s
+' "$name"
   done
   printf '%s' "$CATALOGUE" | jq -r '.[].name'
 }
@@ -609,7 +628,7 @@ jq -n \
   --argjson warnings        "$WARNINGS" \
   '{
      installed: true,
-     schema: 7,
+     schema: 8,
      repoRoot: $repoRoot, commit: $commit, role: $role, primaryDomain: $primaryDomain,
      docker: $docker, compose: $compose,
      tools: $tools,
