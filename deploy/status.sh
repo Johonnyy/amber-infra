@@ -185,6 +185,28 @@ app_names() {
   done
 }
 
+# The editable source of an app's environment: `apps.<name>.env` in secrets.yaml,
+# NOT the rendered .env beside the container. The rendered file is downstream — a GUI
+# that wrote to it would be overwritten by the next install.
+#
+# A value is emitted only when the key name says it is not a secret. `secret` is
+# decided by suffix, and the rule is deliberately blunt: anything ending _KEY, _KEYS,
+# _TOKEN, _SECRET, _PASSWORD or _PASS is never printed, whatever it holds. `set` and
+# `placeholder` still describe it, which is everything an editor needs — you do not
+# have to see an API key to replace it, and this script stays safe to poll and log.
+app_env_json() {  # app_env_json NAME
+  if [ "$SECRETS_READABLE" != "true" ]; then echo '[]'; return 0; fi
+  yq -o=json ".apps.\"$1\".env // {}" "$SECRETS_FILE" 2>/dev/null | jq -c '
+    def issecret: test("(_KEY|_KEYS|_TOKEN|_SECRET|_PASSWORD|_PASS)$");
+    to_entries | map({
+      name: .key,
+      secret: (.key | issecret),
+      placeholder: (.value | tostring | test("CHANGEME")),
+      set: ((.value | tostring | length) > 0),
+      value: (if (.key | issecret) then null else (.value | tostring) end)
+    })' 2>/dev/null || echo '[]'
+}
+
 app_json() {  # app_json NAME
   local name="$1" dir="$ETC/$1"
   local compose pinned running state health domain upstream http env_file env_keys
@@ -226,6 +248,7 @@ app_json() {  # app_json NAME
     --argjson compose  "$(jnul "$compose")" \
     --argjson http     "${http:-null}" \
     --argjson envKeys  "$env_keys" \
+    --argjson env      "$(app_env_json "$name")" \
     --argjson registry "$SYNC_SERVERS" \
     '($registry | map(select(.name == $name)) | .[0]) as $r | {
        name: $name, domain: $domain, upstream: $upstream,
@@ -233,7 +256,7 @@ app_json() {  # app_json NAME
        container: $state, health: $health,
        envFile: $envFile, composeFile: $compose,
        registered: ($r != null), lastSeen: ($r.lastSeen // null), stale: ($r.stale // false),
-       httpStatus: $http, envKeys: $envKeys
+       httpStatus: $http, envKeys: $envKeys, env: $env
      }'
 }
 
@@ -296,6 +319,12 @@ jq -n \
   --argjson placeholdersGen "$PLACEHOLDERS_GEN" \
   --argjson placeholdersManual "$PLACEHOLDERS_MANUAL" \
   --argjson acmeEmailSet    "$ACME_SET" \
+  --argjson settings        "$(jq -n \
+      --argjson acmeEmail     "$(jnul "$ACME_EMAIL")" \
+      --argjson primaryDomain "$(jnul "$(sget '.infra.primary_domain')")" \
+      --argjson timezone      "$(jnul "$(sget '.infra.timezone')")" \
+      --argjson role          "$(jnul "$(sget '.infra.role')")" \
+      '{acmeEmail: $acmeEmail, primaryDomain: $primaryDomain, timezone: $timezone, role: $role}')" \
   --argjson tools           "$(jq -n \
       --argjson git "$(have git && echo true || echo false)" \
       --argjson jq_ "$(have jq && echo true || echo false)" \
@@ -316,7 +345,7 @@ jq -n \
   --argjson warnings        "$WARNINGS" \
   '{
      installed: true,
-     schema: 2,
+     schema: 3,
      repoRoot: $repoRoot, commit: $commit, role: $role, primaryDomain: $primaryDomain,
      docker: $docker, compose: $compose,
      tools: $tools,
@@ -325,6 +354,7 @@ jq -n \
        acmeEmailSet: $acmeEmailSet,
        placeholders: { generatable: $placeholdersGen, manual: $placeholdersManual }
      },
+     settings: $settings,
      secretsReadable: $secretsReadable,
      apps: $apps,
      caddy: { running: ($caddyState == "running"), health: $caddyHealth, sites: $caddySites },
