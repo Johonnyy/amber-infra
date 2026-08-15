@@ -25,6 +25,7 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$REPO_ROOT/install/lib/preflight.sh"
 
 APP=""; DOMAIN=""; UPSTREAM=""; ROLE=""; IMAGE=""; DESCRIPTOR=""
+SKIP_DNS_CHECK="${SKIP_DNS_CHECK:-0}"
 
 usage() {
   cat <<'EOF'
@@ -41,6 +42,8 @@ Usage: install.sh --app NAME --domain FQDN [options]
   --descriptor FILE   register FILE by hand — only for an app with no agent-mcp-py
   --secrets FILE      default /etc/amber-infra/secrets.yaml
   --dry-run           print every action, change nothing
+  --skip-dns-check    proceed even when a hostname does not resolve here; only for
+                      a genuinely proxied or split-horizon setup
 EOF
 }
 
@@ -54,6 +57,7 @@ while [ $# -gt 0 ]; do
     --descriptor) DESCRIPTOR="$2"; shift 2 ;;
     --secrets)    SECRETS_FILE="$2"; shift 2 ;;
     --dry-run)    DRY_RUN=1; shift ;;
+    --skip-dns-check) SKIP_DNS_CHECK=1; shift ;;
     -h|--help)    usage; exit 0 ;;
     *)            usage; die "unknown argument: $1" ;;
   esac
@@ -119,15 +123,15 @@ preflight_image "$IMAGE"
 if [ "$ROLE" = "core" ]; then
   preflight_image "$(secrets_get '.sync_store.image')"
 fi
-preflight_dns "$DOMAIN"
-# The one hostname nobody remembers, because nobody types it: on a core box the
-# sync-store gets a site at sync.<primary_domain>, derived rather than passed. Without
-# a record for it, caddy_add_site adds the block anyway and you find out from a
-# two-minute wait_for_http timeout and a warning — after ACME has already burned an
-# attempt on it.
+# Every hostname this box will serve, checked together and before Caddy exists.
+#
+# The second one is the one nobody remembers, because nobody types it: on a core box
+# the sync-store gets a site at sync.<primary_domain>, derived rather than passed.
+DNS_NAMES=("$DOMAIN")
 if [ "$ROLE" = "core" ]; then
-  preflight_dns "sync.$(secrets_get '.infra.primary_domain')"
+  DNS_NAMES+=("sync.$(secrets_get '.infra.primary_domain')")
 fi
+preflight_dns_all "${DNS_NAMES[@]}"
 
 # ==== 2. TLS edge ============================================================
 ensure_caddy "$ACME_EMAIL"

@@ -145,30 +145,79 @@ preflight_image() {  # preflight_image IMAGE
      If it is there but private, make it public, or run 'docker login ghcr.io' here."
 }
 
-preflight_dns() {  # preflight_dns DOMAIN
-  local domain="$1" resolved public
-  [ -n "$domain" ] || return 0
+public_ip() {
+  # Two providers, because a single one being down should not turn "your DNS is
+  # wrong" into "checks skipped".
+  local ip
+  ip="$(curl -fsS --max-time 5 https://api.ipify.org 2>/dev/null || true)"
+  [ -n "$ip" ] || ip="$(curl -fsS --max-time 5 https://ifconfig.me 2>/dev/null || true)"
+  printf '%s' "$ip"
+}
 
-  resolved="$(getent ahostsv4 "$domain" 2>/dev/null | awk 'NR==1 {print $1}')"
-  if [ -z "$resolved" ]; then
-    die "$domain does not resolve.
-     Point an A record at this box BEFORE installing: Caddy requests a certificate
-     as soon as the site block appears, and Let's Encrypt rate-limits failures per
-     domain — a premature attempt can lock you out of retrying for an hour."
-  fi
+preflight_dns_all() {  # preflight_dns_all DOMAIN...
+  # Every hostname this box is about to serve, checked together and BEFORE Caddy is
+  # touched.
+  #
+  # This refuses rather than warns, which is a change: a wrong A record used to be a
+  # warning on the grounds that a proxy or split-horizon DNS can legitimately look
+  # like one. That was the wrong trade. Caddy asks for a certificate the moment a site
+  # block appears, Let's Encrypt rate-limits failures per domain, and the cost of
+  # being wrong is not a failed install — it is an hour of not being able to retry.
+  # `--skip-dns-check` is there for the setups that really are proxied.
+  #
+  # All of them are checked before any of them fails, so one round of fixing DNS is
+  # enough. Dying on the first would have you find the second twenty minutes later.
+  local public domain resolved addresses failed=0 total=0
 
-  public="$(curl -fsS --max-time 5 https://api.ipify.org 2>/dev/null || true)"
-  if [ -n "$public" ] && [ "$resolved" != "$public" ]; then
-    warn "$domain resolves to $resolved but this box's public IP is $public.
-
-     Unless a proxy or split-horizon DNS explains that — which is the only reason this
-     is a warning and not a refusal — the A record is simply wrong, and ACME will fail
-     every time Caddy retries. Let's Encrypt rate-limits failures per domain, so the
-     cost of continuing is not one failed install, it is an hour of not being able to
-     try again.
-
-     Fix the A record to point at $public, then re-run. Continuing anyway."
+  step "Checking DNS for every hostname this box will serve"
+  public="$(public_ip)"
+  if [ -z "$public" ]; then
+    warn "could not determine this box's public IP — records can be checked for
+     existence but not for pointing here."
   else
-    ok "$domain resolves to $resolved"
+    ok "this box is $public"
   fi
+
+  for domain in "$@"; do
+    [ -n "$domain" ] || continue
+    total=$((total + 1))
+
+    addresses="$(getent ahostsv4 "$domain" 2>/dev/null | awk '{print $1}' | sort -u || true)"
+    if [ -z "$addresses" ]; then
+      warn "$domain does not resolve at all"
+      failed=$((failed + 1))
+      continue
+    fi
+
+    resolved="$(printf '%s' "$addresses" | tr '\n' ' ' | sed 's/ $//')"
+    if [ -z "$public" ]; then
+      ok "$domain resolves to $resolved (not verified against this box)"
+    # Any address matching is a pass: a name with round-robin records is pointing
+    # here even when the first answer is not this box.
+    elif printf '%s\n' "$addresses" | grep -qx "$public"; then
+      ok "$domain -> $resolved"
+    else
+      warn "$domain -> $resolved, but this box is $public"
+      failed=$((failed + 1))
+    fi
+  done
+
+  [ "$failed" -eq 0 ] && return 0
+
+  if [ "${SKIP_DNS_CHECK:-0}" = "1" ]; then
+    warn "$failed of $total record(s) do not point here — continuing because
+     --skip-dns-check was given. ACME will fail for those names."
+    return 0
+  fi
+
+  die "$failed of $total hostname(s) do not point at this box.
+
+     Fix the A record(s) above to $public and re-run. Nothing has been changed.
+
+     Caddy requests a certificate as soon as a site block appears, and Let's Encrypt
+     rate-limits failures per domain — so installing now does not cost one failed
+     attempt, it costs an hour of not being able to try again.
+
+     If this is genuinely fronted by a proxy or split-horizon DNS, re-run with
+     --skip-dns-check."
 }

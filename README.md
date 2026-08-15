@@ -121,6 +121,44 @@ not before.
 `amber_v2/deploy/` still works and is still the right way to run Amber on a dev VPS
 or any box without Docker.
 
+## Releasing
+
+Two kinds of change live in this repo and only one of them needs a tag.
+
+**Shell and config — install.sh, status.sh, the lib/, the Caddyfile, this README.**
+No tag. Boxes get these by `git pull` on `/opt/amber-infra` (Aperture's *Update
+infra* button). Push to main and they are available immediately.
+
+**sync-store/ — the one thing here that ships as a container image.** A tag, because
+that is the only thing that publishes one:
+
+```bash
+git tag v0.1.1 && git push origin v0.1.1
+```
+
+`.github/workflows/release.yml` turns ref `v0.1.1` into
+`ghcr.io/<owner>/sync-store:0.1.1`. The version in the image tag *is* the git tag —
+that is the whole mechanism, and it is why `sync_store.image` in secrets.yaml can pin
+an exact one.
+
+Two things that trip this up:
+
+* **The workflow must already exist on the commit being tagged.** Actions runs the
+  workflow file as it is at the pushed ref, so tagging a commit from before the
+  workflow was committed triggers nothing at all — not a failure, just silence.
+* **GHCR packages are private by default**, and a box pulls unauthenticated. A private
+  package fails exactly like one that was never pushed. Make it public, or
+  `docker login ghcr.io` on the server. `preflight_image` catches both before an
+  install touches anything.
+
+**Publishing is not deploying**, deliberately. A published image sits in the registry
+until you bump the pin in secrets.yaml and reconcile. A green build is not a decision
+to run something on Server A.
+
+**Never move a tag that has been published.** The one-off exception is a tag nothing
+ever built from — otherwise a server may be running `:0.1.0` while `:0.1.0` now means
+different code, and every guarantee that pinning gives you is gone.
+
 ## Runbook
 
 **What is on this box?**
