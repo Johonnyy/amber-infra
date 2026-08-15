@@ -53,10 +53,6 @@ sync_store_up() {
 
 ensure_sync_store() {
   step "Ensuring the sync-store is running"
-  if sync_store_up; then
-    ok "sync-store already answering on $(sync_store_local_url)/health"
-    return 0
-  fi
 
   local image port keys
   image="$(secrets_require '.sync_store.image')"
@@ -64,6 +60,37 @@ ensure_sync_store() {
   keys="$(secrets_sync_store_keys)"
   [ -n "$keys" ] || die "$SECRETS_FILE: sync_store.keys is empty — the store would reject every request"
   case "$keys" in *CHANGEME*) die "$SECRETS_FILE: sync_store.keys still holds a CHANGEME placeholder" ;; esac
+
+  # Already running is not the same as already correct.
+  #
+  # This used to return here unconditionally, which meant a store started before an
+  # app existed never learned that app's key — `SYNC_STORE_KEYS` is read once, at
+  # startup. Installing a second app therefore produced a registration 401 forever,
+  # and the app itself looked perfectly healthy while it happened.
+  #
+  # So reconcile instead: compare the rendered key list against secrets.yaml and
+  # restart ONLY when it actually changed. Restarting a healthy registry on every
+  # install would be its own small outage, repeated.
+  if sync_store_up; then
+    local current=""
+    [ -f "$SYNC_STORE_DIR/sync-store.env" ] \
+      && current="$(env_get "$SYNC_STORE_DIR/sync-store.env" SYNC_STORE_KEYS || true)"
+    if [ "$current" = "$keys" ]; then
+      ok "sync-store already answering on $(sync_store_local_url)/health"
+      return 0
+    fi
+    step "The sync-store key list has changed — reloading it"
+    env_set "$SYNC_STORE_DIR/sync-store.env" SYNC_STORE_KEYS "$keys"
+    env_protect "$SYNC_STORE_DIR/sync-store.env"
+    # `--force-recreate` rather than trusting compose to notice. Whether a changed
+    # env_file alone counts as a config change has varied between compose versions,
+    # and "the container is up but running the old key list" is precisely the silent
+    # state this whole function is here to end. No pull: the image has not changed.
+    compose "$SYNC_STORE_DIR" up -d --force-recreate
+    wait_healthy sync-store 90 || die "sync-store did not come back after reloading its keys — docker logs sync-store"
+    ok "sync-store reloaded with $(printf '%s' "$keys" | tr ',' '\n' | grep -c .) key(s)"
+    return 0
+  fi
 
   run mkdir -p "$SYNC_STORE_DIR"
   run install -m 644 "$REPO_ROOT/sync-store/docker-compose.prod.yml" \

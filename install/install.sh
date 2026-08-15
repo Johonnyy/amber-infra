@@ -183,15 +183,27 @@ dry || sed -i -E "s|^(\s*image:\s*)[^[:space:]]+|\1$IMAGE|" "$APP_DIR/docker-com
 secrets_render_env "$APP" "$ENV_FILE"
 
 # ==== 4. wire in agent-bridge features =======================================
+#
+# The app's registry token is minted BEFORE the store is brought up, and the order is
+# load-bearing. `sync_store_token_for` appends a new entry to `sync_store.keys[]`, and
+# the store reads `SYNC_STORE_KEYS` once, at startup. Minting afterwards produced a
+# token the running store had never heard of: the app booted, served, answered its
+# healthcheck, and every registration attempt was a 401 nothing surfaced. The only
+# symptom was the word "unregistered" in a status report.
+#
+# Amber never hit it because `sync_store.keys[]` ships an `amber` entry in the example,
+# so her token exists before the store first starts. The second app is the one that
+# breaks — which is the same shape as the env-prefix bug: correct for the one case that
+# existed, wrong for the next one.
+step "Wiring $APP into the sync-store"
+APP_TOKEN="$(sync_store_token_for "$APP")"
+SYNC_URL="$(secrets_require '.sync_store.url')"
+
 if [ "$ROLE" = "core" ]; then
   ensure_sync_store
   caddy_add_site sync-store "sync.$(secrets_get '.infra.primary_domain')" \
       "127.0.0.1:$(secrets_get '.sync_store.port' 8081)"
 fi
-
-step "Wiring $APP into the sync-store"
-APP_TOKEN="$(sync_store_token_for "$APP")"
-SYNC_URL="$(secrets_require '.sync_store.url')"
 
 # Which prefix these three keys are written under is the app's decision, not ours.
 #
