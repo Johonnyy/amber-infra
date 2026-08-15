@@ -1,11 +1,19 @@
-"""The HTTP surface: a server registry, a config blob store, and a health check.
+"""The HTTP surface: a server registry, shared model keywords, a config blob store,
+and a health check.
 
-Two conceptually separate things in one tiny service, because running two processes
-for this would be silly:
+Three conceptually separate things in one tiny service, because running three
+processes for this would be silly:
 
 * **``/servers``** — what every ``agent-mcp-py`` app POSTs on startup and every 300
   seconds thereafter, and what Amber, the spawner and Aperture GET to discover
   peers. The shapes are not ours to choose; see ``app/models.py``.
+* **``/models``** — the ecosystem's shared answer to "what does ``coding`` mean".
+  Apps pick a model by *describing* it (``fast``, ``cheap``, ``coding``) and resolve
+  that word locally against their own built-in defaults; this table is the layer they
+  all merge on top, so re-pointing a keyword once moves every app at once instead of
+  requiring a release each. **Overrides only** — an absent keyword means "nobody
+  changed it", not "undefined". Unlike ``/config`` this blob is not opaque: the store
+  validates it, because a bad model id here breaks every reader at once.
 * **``/config``** — Aperture's cross-device storage for one opaque JSON blob. The
   store never interprets it.
 
@@ -44,9 +52,14 @@ from app.models import (
     ConfigRead,
     ConfigWrite,
     HealthResponse,
+    KeywordMapWrite,
+    KeywordsRead,
+    KeywordWrite,
     RegisterResponse,
     ServerDescriptor,
     TokenUpdate,
+    validate_keyword,
+    validate_model_id,
 )
 
 logger = logging.getLogger(__name__)
@@ -281,6 +294,116 @@ def build_app(settings: Settings | None = None, *, store: Store | None = None) -
             raise StarletteHTTPException(404, f"no server registered as {name!r}")
         logger.info("[%s] Deleted by %s", name, caller.caller)
         return {"status": "ok", "deleted": True}
+
+    # --- shared model keywords ---
+
+    @app.get("/models", response_model=KeywordsRead)
+    async def list_keywords(request: Request, caller: AuthResult = Caller) -> KeywordsRead:
+        """The shared keyword table: what ``coding`` (or ``fast``, or ``sql``) means.
+
+        **Overrides only.** Every app ships its own built-in defaults and merges this
+        table over them, so a keyword absent here is not undefined — it means "nobody
+        has re-pointed it", and each app falls back to what it shipped with. Serving
+        a full table instead would freeze one app's defaults into the ecosystem the
+        first time anybody touched anything.
+
+        An empty store returns an empty map with a 200, so a first-run app has no
+        special case to write.
+        """
+        records = await asyncio.to_thread(_store(request).list_keywords)
+        return KeywordsRead(keywords=records, count=len(records), generated_at=now_iso())
+
+    @app.put("/models/{keyword}")
+    async def set_keyword(
+        request: Request, keyword: str, body: KeywordWrite, caller: AuthResult = Caller
+    ) -> dict:
+        """Point one keyword at one model, for every app that reads this store."""
+        try:
+            name = validate_keyword(keyword)
+        except ValueError as exc:
+            raise StarletteHTTPException(400, str(exc)) from None
+
+        result = await asyncio.to_thread(
+            _store(request).set_keyword,
+            keyword=name,
+            model=body.model,
+            description=body.description,
+            updated_by=caller.caller,
+        )
+        logger.info(
+            "[models] %s -> %s by %s", name, body.model, caller.caller
+        )
+        return {"status": "ok", "keyword": name, "model": body.model, **result}
+
+    @app.put("/models")
+    async def set_keywords(
+        request: Request, body: KeywordMapWrite, caller: AuthResult = Caller
+    ) -> dict:
+        """Apply a patch to the shared table — several keywords in one round trip.
+
+        A patch, never a replacement: see `KeywordMapWrite`. A ``null`` value removes
+        that keyword, which is the same "back to your default" gesture the rest of the
+        ecosystem spells with ``null``.
+
+        The whole body is validated **before** anything is written, so a typo in the
+        fourth entry cannot leave the shared table half-updated.
+        """
+        sets: list[tuple[str, str, str]] = []
+        deletes: list[str] = []
+        for raw_keyword, value in body.keywords.items():
+            try:
+                name = validate_keyword(raw_keyword)
+                if value is None:
+                    deletes.append(name)
+                elif isinstance(value, str):
+                    sets.append((name, validate_model_id(value), ""))
+                elif isinstance(value, dict):
+                    entry = KeywordWrite(**value)
+                    sets.append((name, entry.model, entry.description))
+                else:
+                    raise ValueError(
+                        f"{raw_keyword!r} must be a model id, an object, or null"
+                    )
+            except (ValueError, TypeError) as exc:
+                raise StarletteHTTPException(400, str(exc)) from None
+
+        store = _store(request)
+        for name, model, description in sets:
+            await asyncio.to_thread(
+                store.set_keyword,
+                keyword=name,
+                model=model,
+                description=description,
+                updated_by=caller.caller,
+            )
+        removed = []
+        for name in deletes:
+            if await asyncio.to_thread(store.delete_keyword, name):
+                removed.append(name)
+
+        logger.info(
+            "[models] %s set %d, removed %d",
+            caller.caller,
+            len(sets),
+            len(removed),
+        )
+        return {
+            "status": "ok",
+            "set": [name for name, _, _ in sets],
+            "removed": removed,
+        }
+
+    @app.delete("/models/{keyword}")
+    async def delete_keyword(
+        request: Request, keyword: str, caller: AuthResult = Caller
+    ) -> dict:
+        """Remove a keyword. Every app falls back to its own default for it."""
+        name = keyword.strip().lower()
+        found = await asyncio.to_thread(_store(request).delete_keyword, name)
+        if not found:
+            raise StarletteHTTPException(404, f"no shared keyword named {name!r}")
+        logger.info("[models] %s removed by %s", name, caller.caller)
+        return {"status": "ok", "keyword": name, "deleted": True}
 
     # --- config sync ---
 

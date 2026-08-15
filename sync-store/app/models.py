@@ -105,6 +105,79 @@ class TokenUpdate(BaseModel):
     token: str = ""
 
 
+#: A model keyword: lowercase, no slash (which would make it ambiguous with a model
+#: id), short enough to be a label in a picker. Mirrors ``amber/app/models.py``.
+_KEYWORD_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
+
+#: ``vendor/model``. Requiring the slash is what keeps a keyword and a model id
+#: distinguishable everywhere, and it catches the commonest mistake — a keyword
+#: pasted into the model field — here rather than as a 400 from OpenRouter mid-turn.
+_MODEL_ID_RE = re.compile(r"^[^\s/]+/[^\s]{1,120}$")
+
+MAX_DESCRIPTION_LEN = 200
+
+
+def validate_keyword(keyword: str) -> str:
+    """Return the normalised keyword, or raise ``ValueError``."""
+    cleaned = (keyword or "").strip().lower()
+    if not cleaned:
+        raise ValueError("keyword must not be empty")
+    if not _KEYWORD_RE.match(cleaned):
+        raise ValueError(
+            f"keyword {keyword!r} must be lowercase letters, digits, '-' or '_', "
+            "start with a letter, and contain no '/' (which would make it "
+            "indistinguishable from a model id)"
+        )
+    return cleaned
+
+
+def validate_model_id(model: str) -> str:
+    """Return the trimmed model id, or raise ``ValueError``."""
+    cleaned = (model or "").strip()
+    if not _MODEL_ID_RE.match(cleaned):
+        raise ValueError(
+            f"model {model!r} must look like 'vendor/model' — a bare keyword here "
+            "would resolve to nothing at every app that read it"
+        )
+    return cleaned
+
+
+class KeywordWrite(BaseModel):
+    """Point one keyword at one model."""
+
+    model_config = ConfigDict(extra="allow")
+
+    model: str
+    #: What the keyword is *for*. Optional, and the reason it is stored at all: a
+    #: keyword invented on one device is meaningless on another without it.
+    description: str = ""
+
+    @field_validator("model")
+    @classmethod
+    def _check_model(cls, value: str) -> str:
+        return validate_model_id(value)
+
+    @field_validator("description")
+    @classmethod
+    def _check_description(cls, value: str) -> str:
+        return (value or "").strip()[:MAX_DESCRIPTION_LEN]
+
+
+class KeywordMapWrite(BaseModel):
+    """A **patch** over the shared table, not a replacement.
+
+    ``{"coding": "vendor/x", "writing": null}`` sets one and removes the other; a
+    keyword this body never mentions is left alone. Replacement semantics would mean
+    any app pushing its own view of the table silently deletes every keyword it has
+    not heard of yet — which is precisely what a shared table cannot afford.
+
+    A value may be a bare model id or a ``{"model", "description"}`` object, so the
+    common case stays a one-line JSON body.
+    """
+
+    keywords: dict[str, str | dict | None]
+
+
 class ConfigWrite(BaseModel):
     device_id: str = Field(min_length=1)
     #: A JSON object, not an array or scalar. The store never looks inside it; the
@@ -118,6 +191,21 @@ class ConfigRead(BaseModel):
     device_id: str | None
     blob: dict | None
     created_at: str | None
+
+
+class KeywordRecord(BaseModel):
+    model: str
+    description: str = ""
+    updated_at: str
+    updated_by: str = ""
+
+
+class KeywordsRead(BaseModel):
+    """The shared table. Keyed by keyword, because that is how every reader uses it."""
+
+    keywords: dict[str, KeywordRecord]
+    count: int
+    generated_at: str
 
 
 class HealthResponse(BaseModel):

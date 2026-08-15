@@ -1,7 +1,8 @@
 # sync-store
 
-The ecosystem's discovery registry and Aperture's cross-device config store. One
-FastAPI process, one SQLite file, four runtime dependencies.
+The ecosystem's discovery registry, its shared model-keyword table, and Aperture's
+cross-device config store. One FastAPI process, one SQLite file, four runtime
+dependencies.
 
 It exists because `agent-mcp-py` already implements both halves of a contract with
 nothing on the other end: every MCP server calls `sync_client.register()` on startup
@@ -45,6 +46,11 @@ GET    /servers/{name}             one record
 PUT    /servers/{name}/token       set/clear the peer credential; never echoes it
 DELETE /servers/{name}             the only removal path
 
+GET    /models                     the shared keyword table; {} on a fresh store
+PUT    /models                     patch: {"keywords": {"coding": "vendor/x", "old": null}}
+PUT    /models/{keyword}           {model, description?} — one keyword
+DELETE /models/{keyword}           remove; readers fall back to their own default
+
 POST   /config                     {device_id, blob} — blob must be a JSON object
 GET    /config                     ?device_id= optional; newest wins; nulls if empty
 GET    /config/history             metadata only, no blobs
@@ -52,6 +58,39 @@ GET    /config/history             metadata only, no blobs
 
 The config half is Aperture's storage and nothing else. The store never interprets
 the blob; it stores bytes and hands them back.
+
+## Shared model keywords
+
+Apps in this ecosystem pick a model by *describing* it — `fast`, `cheap`, `coding`,
+`reasoning` — and resolve that word locally against their own built-in defaults. This
+table is the layer every app merges on top, so re-pointing `coding` at a model that
+shipped this morning moves the whole fleet at once instead of needing a release per
+app. Amber writes it (from Aperture's model picker) and reads it back on a timer;
+`app/models.py` and `app/model_sync.py` over there are the reference consumer.
+
+Three rules make it safe to share:
+
+**It holds overrides only.** A keyword absent here is not undefined — it means nobody
+has re-pointed it, and each app uses what it shipped with. Serving a *complete* table
+would freeze whichever app wrote first into everyone else's defaults, permanently.
+
+**Every write is a patch.** `PUT /models` upserts the keywords in the body and deletes
+the ones sent as `null`; it never touches a keyword the body doesn't mention. An app
+pushing its own view of the world must not be able to delete keywords it has never
+heard of. The whole body is validated before anything is written, so a typo in the
+fourth entry cannot half-apply.
+
+**Unlike `/config`, this blob is not opaque.** The store validates keyword names and
+model ids, because a bare keyword in a model field here fails at request time in every
+reader at once, with nothing to say why. A keyword is `^[a-z][a-z0-9_-]{0,31}$`; a
+model is `vendor/model`. Descriptions ride along, because a keyword invented on one
+device is a bare word everywhere else without one — and an update that omits the
+description keeps the stored one rather than blanking it.
+
+The HTTP client for this lives in Amber today rather than in `agent-mcp-py`. That is
+where it belongs once there is a second consumer; until then, the contract above is
+about thirty lines to implement and one more shared abstraction with a single caller
+is the worse trade.
 
 ## Staleness fails open
 

@@ -1,10 +1,12 @@
-"""SQLite storage for both halves of the store.
+"""SQLite storage for all three halves of the store.
 
-Two tables, one file, and no relationship between them. The **server registry** is
+Three tables, one file, and no relationship between them. The **server registry** is
 what ``agent_mcp.sync_client.register()`` writes and ``agent_mcp.registry
 .PeerRegistry.refresh()`` reads. The **config blobs** are Aperture's cross-device
-storage, which this service never interprets. They share a process because running
-two services for this would be silly, and share nothing else.
+storage, which this service never interprets. The **model keywords** are the
+ecosystem's shared answer to "what does ``coding`` mean" — every app resolves that
+word locally, and this is where they agree on it. They share a process because
+running three services for this would be silly, and share nothing else.
 
 Follows the ecosystem's SQLite house pattern (``agent_mcp.usage_log``): a
 module-level ``_SCHEMA`` of ``CREATE TABLE IF NOT EXISTS`` run through
@@ -57,6 +59,14 @@ CREATE TABLE IF NOT EXISTS config_blobs (
     created_at  TEXT    NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_config_device ON config_blobs (device_id, id DESC);
+
+CREATE TABLE IF NOT EXISTS model_keywords (
+    keyword     TEXT    PRIMARY KEY,          -- lowercase, no slash; see models.validate_keyword
+    model       TEXT    NOT NULL,             -- 'vendor/model'
+    description TEXT    NOT NULL DEFAULT '',  -- what the keyword is FOR; travels with it
+    updated_at  TEXT    NOT NULL,
+    updated_by  TEXT    NOT NULL DEFAULT ''   -- the caller name from the bearer key
+);
 """
 
 
@@ -319,6 +329,84 @@ class Store:
             "blob": json.loads(row["blob_json"]),
             "created_at": row["created_at"],
         }
+
+    # --- shared model keywords ---
+
+    def list_keywords(self) -> dict[str, dict]:
+        """The whole shared table, keyed by keyword.
+
+        Small by construction — a keyword is a word a human invented — so there is no
+        pagination and no filtering. Every reader wants all of it.
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT keyword, model, description, updated_at, updated_by "
+                "FROM model_keywords ORDER BY keyword"
+            ).fetchall()
+        return {
+            r["keyword"]: {
+                "model": r["model"],
+                "description": r["description"],
+                "updated_at": r["updated_at"],
+                "updated_by": r["updated_by"],
+            }
+            for r in rows
+        }
+
+    def set_keyword(
+        self,
+        *,
+        keyword: str,
+        model: str,
+        description: str = "",
+        updated_by: str = "",
+        now: str | None = None,
+    ) -> dict:
+        """Point a keyword at a model. Upsert — one row per keyword, always.
+
+        An empty ``description`` on an update **keeps** the stored one rather than
+        blanking it: the common write is an app re-pointing a keyword it did not name,
+        and losing the explanation every time a model changed would leave the shared
+        table full of bare words within a week. Clearing is possible by sending a
+        description of ``" "``… which is exactly why the API layer trims and this
+        layer treats empty as absent.
+        """
+        stamp = now or now_iso()
+        with self._lock:
+            existing = self._conn.execute(
+                "SELECT 1 FROM model_keywords WHERE keyword = ?", (keyword,)
+            ).fetchone()
+            self._conn.execute(
+                """
+                INSERT INTO model_keywords (keyword, model, description, updated_at, updated_by)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(keyword) DO UPDATE SET
+                    model       = excluded.model,
+                    description = CASE WHEN excluded.description = ''
+                                       THEN model_keywords.description
+                                       ELSE excluded.description END,
+                    updated_at  = excluded.updated_at,
+                    updated_by  = excluded.updated_by
+                """,
+                (keyword, model, description, stamp, updated_by),
+            )
+            self._conn.commit()
+        return {"created": existing is None, "updated_at": stamp}
+
+    def delete_keyword(self, keyword: str) -> bool:
+        """Remove a keyword from the shared table.
+
+        A hard delete, unlike a server record (which is only ever flagged stale). The
+        asymmetry is deliberate: a missing server breaks discovery for a live app,
+        while a missing keyword means every app falls back to its own built-in
+        default — a defined, working state.
+        """
+        with self._lock:
+            cursor = self._conn.execute(
+                "DELETE FROM model_keywords WHERE keyword = ?", (keyword,)
+            )
+            self._conn.commit()
+        return cursor.rowcount > 0
 
     def config_history(self, *, device_id: str | None = None, limit: int = 20) -> list[dict]:
         """Metadata only — no blobs, so this stays cheap however large they get."""

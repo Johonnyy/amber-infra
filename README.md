@@ -14,9 +14,17 @@ Amber needs no code change to use it. `AMBER_MCP_PUBLIC_URL`,
 through her config into `AgentMCPSettings` — `install.sh` sets them and she
 registers herself.
 
+It also holds the ecosystem's **shared model-keyword table** (`/models`). Apps pick a
+model by describing it — `fast`, `cheap`, `coding` — and resolve that word against
+their own built-in defaults; this table is the override layer they all merge on top,
+so re-pointing `coding` once moves the fleet instead of needing a release per app.
+Amber writes it from Aperture's model picker and reads it back on a timer, and keeps
+working from her own copy when the store is unreachable. See
+[sync-store/README.md](sync-store/README.md).
+
 ```
 caddy/         the TLS edge: one Caddyfile, one snippet per app
-sync-store/    the registry + Aperture's config sync   <- start here
+sync-store/    the registry, shared model keywords, Aperture's config sync   <- start here
 amber/         Amber's image, compose, and self-update units
 bloom/         Bloom's compose — the agent spawner, core service on Server A
 secrets/       secrets.example.yaml — the single source for every generated .env
