@@ -8,9 +8,20 @@
 
 {
 	email {$ACME_EMAIL}
-	# No admin API on localhost:2019. Reloads go through `caddy reload`, which is
-	# what install/lib/caddy.sh does after validating.
-	admin off
+	# The admin API on a unix socket, not off and not on a TCP port.
+	#
+	# `caddy reload` is the ONLY way to reload Caddy v2 — there is no SIGHUP, no
+	# SIGUSR1 — and it works by POSTing to this endpoint. `admin off` therefore made
+	# every reload fail with "connection refused", which is what install.sh hit the
+	# moment it added its first site.
+	#
+	# A socket rather than localhost:2019 because the edge runs with
+	# network_mode: host, so a TCP admin endpoint would bind the HOST's loopback and
+	# be reachable by any local process — and admin API access is equivalent to root.
+	# The socket lives inside the container and is not bind-mounted, so only Caddy
+	# and anything with `docker exec` can reach it, which is the same trust boundary
+	# as the reload command itself.
+	admin unix//run/caddy-admin.sock
 	servers {
 		trusted_proxies static private_ranges
 	}

@@ -33,12 +33,30 @@ caddy_validate() {
   docker exec caddy caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
 }
 
+#: Where the admin API listens. Must match the `admin` line in caddy/Caddyfile —
+#: `caddy reload` defaults to localhost:2019 and will not find a socket on its own.
+CADDY_ADMIN="${CADDY_ADMIN:-unix//run/caddy-admin.sock}"
+
 caddy_reload() {
   if dry; then
     echo "   ${c_yellow}dry-run${c_off} would reload caddy"
     return 0
   fi
-  docker exec caddy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile
+
+  if docker exec caddy caddy reload \
+       --config /etc/caddy/Caddyfile --adapter caddyfile --address "$CADDY_ADMIN"; then
+    return 0
+  fi
+
+  # A graceful reload is preferred and not essential. Restarting drops in-flight
+  # connections — including Amber's voice WebSocket — but leaving the edge running
+  # the OLD config after we just wrote a new snippet is worse: the site silently does
+  # not exist, and nothing says so until someone visits it.
+  warn "graceful reload failed (admin endpoint $CADDY_ADMIN) — restarting the edge instead.
+     If this persists, the admin address here and the 'admin' line in the Caddyfile
+     have drifted apart."
+  run docker restart caddy >/dev/null
+  wait_healthy caddy 60
 }
 
 ensure_caddy() {  # ensure_caddy ACME_EMAIL
