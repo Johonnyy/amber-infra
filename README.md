@@ -38,6 +38,26 @@ slip cannot expose an app past TLS.
 
 ## Adding an app
 
+Three things, and `install.sh` checks the first two before it touches the box:
+
+1. **A stanza under `apps:`** in `/etc/amber-infra/secrets.yaml` — domain, upstream,
+   pinned image, and its `*_MCP_KEYS` token. Aperture's Servers tab writes this for
+   you (Declare); the commented template at the bottom of `secrets.example.yaml` is
+   the same thing by hand.
+2. **`<name>/docker-compose.prod.yml` committed to this repo.** There is deliberately
+   no generic template. An app's volume, health check and loopback port binding are
+   its own, and a rendered guess is how you get a container that starts and stores
+   nothing. Model it on `sync-store/docker-compose.prod.yml`.
+3. **DNS already pointing here**, because Caddy asks for a certificate the moment the
+   site block appears and Let's Encrypt rate-limits failures per domain.
+
+Nothing is declared before it exists. An app in this file is a claim that the app is
+real: it becomes a row in every status report, its placeholders become entries in
+every "still to do" list, and its install stops at *no compose file* — which is a
+confusing way to discover that you have not written it yet.
+
+Then:
+
 ```bash
 sudo bash /opt/amber-infra/install/install.sh \
      --app finance --domain finance.johnny.dev --upstream 127.0.0.1:8090 --dry-run

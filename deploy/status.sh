@@ -122,8 +122,16 @@ if [ "$SECRETS_READABLE" = "true" ] && have jq; then
        | select((getpath($p) | test("CHANGEME-openssl-rand-hex"))
                 or ($p[-1] | tostring | test("_KEYS$")))
        | $p | join(".")]' 2>/dev/null || echo '[]')"
+  # install.sh recomputes these on every run, so a placeholder in one is not a task —
+  # listing it would send someone hunting for a value that is about to be overwritten.
+  DERIVED_PATHS="$(printf '%s' "$SECRETS_JSON" | jq -c '
+      [paths(type == "string" and test("CHANGEME")) as $p
+       | select($p[-1] | tostring
+                | test("(_PUBLIC_URL|_SYNC_STORE_URL|_SYNC_STORE_TOKEN)$") or . == "AMBER_UPDATE_COMMAND")
+       | $p | join(".")]' 2>/dev/null || echo '[]')"
   PLACEHOLDERS_GEN="$GEN_PATHS"
-  PLACEHOLDERS_MANUAL="$(printf '%s' "$ALL_PATHS" | jq -c --argjson gen "$GEN_PATHS" '. - $gen')"
+  PLACEHOLDERS_MANUAL="$(printf '%s' "$ALL_PATHS" \
+    | jq -c --argjson gen "$GEN_PATHS" --argjson derived "$DERIVED_PATHS" '. - $gen - $derived')"
 fi
 
 # Two settings that are not CHANGEME but are still the example's values, and both
@@ -198,9 +206,16 @@ app_env_json() {  # app_env_json NAME
   if [ "$SECRETS_READABLE" != "true" ]; then echo '[]'; return 0; fi
   yq -o=json ".apps.\"$1\".env // {}" "$SECRETS_FILE" 2>/dev/null | jq -c '
     def issecret: test("(_KEY|_KEYS|_TOKEN|_SECRET|_PASSWORD|_PASS)$");
+    # install.sh writes these into the rendered .env AFTER secrets_render_env, so
+    # whatever secrets.yaml holds for them is overwritten on every install. Flagging
+    # them stops a setup screen listing a derived value as something a human has to
+    # go and find — see install/install.sh, "Wiring $APP into the sync-store".
+    def isderived:
+      test("(_PUBLIC_URL|_SYNC_STORE_URL|_SYNC_STORE_TOKEN)$") or . == "AMBER_UPDATE_COMMAND";
     to_entries | map({
       name: .key,
       secret: (.key | issecret),
+      derived: (.key | isderived),
       placeholder: (.value | tostring | test("CHANGEME")),
       set: ((.value | tostring | length) > 0),
       value: (if (.key | issecret) then null else (.value | tostring) end)
