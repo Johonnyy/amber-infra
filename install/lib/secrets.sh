@@ -13,9 +13,10 @@
 [ -n "${_AMBER_INFRA_SECRETS:-}" ] && return 0
 _AMBER_INFRA_SECRETS=1
 
-# shellcheck source=install/lib/common.sh
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=common.sh
 . "$(dirname "${BASH_SOURCE[0]}")/common.sh"
-# shellcheck source=install/lib/env.sh
+# shellcheck source=env.sh
 . "$(dirname "${BASH_SOURCE[0]}")/env.sh"
 
 SECRETS_FILE="${SECRETS_FILE:-/etc/amber-infra/secrets.yaml}"

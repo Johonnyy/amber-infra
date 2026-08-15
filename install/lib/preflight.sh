@@ -11,11 +11,12 @@
 [ -n "${_AMBER_INFRA_PREFLIGHT:-}" ] && return 0
 _AMBER_INFRA_PREFLIGHT=1
 
-# shellcheck source=install/lib/common.sh
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=common.sh
 . "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 # preflight_ports needs container_state to tell our containerised edge apart from a
 # Caddy installed on the host — both are just "caddy" in ss output.
-# shellcheck source=install/lib/docker.sh
+# shellcheck source=docker.sh
 . "$(dirname "${BASH_SOURCE[0]}")/docker.sh"
 
 preflight_system() {

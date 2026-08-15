@@ -22,9 +22,10 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-# shellcheck source=install/lib/common.sh
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=../install/lib/common.sh
 . "$REPO_ROOT/install/lib/common.sh"
-# shellcheck source=install/lib/docker.sh
+# shellcheck source=../install/lib/docker.sh
 . "$REPO_ROOT/install/lib/docker.sh"
 
 FORCE=0

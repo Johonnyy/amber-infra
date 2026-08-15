@@ -11,9 +11,10 @@
 [ -n "${_AMBER_INFRA_CADDY:-}" ] && return 0
 _AMBER_INFRA_CADDY=1
 
-# shellcheck source=install/lib/common.sh
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=common.sh
 . "$(dirname "${BASH_SOURCE[0]}")/common.sh"
-# shellcheck source=install/lib/docker.sh
+# shellcheck source=docker.sh
 . "$(dirname "${BASH_SOURCE[0]}")/docker.sh"
 
 CADDY_ETC="${CADDY_ETC:-/etc/caddy}"

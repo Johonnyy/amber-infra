@@ -16,11 +16,12 @@
 [ -n "${_AMBER_INFRA_SYNC_STORE:-}" ] && return 0
 _AMBER_INFRA_SYNC_STORE=1
 
-# shellcheck source=install/lib/common.sh
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=common.sh
 . "$(dirname "${BASH_SOURCE[0]}")/common.sh"
-# shellcheck source=install/lib/docker.sh
+# shellcheck source=docker.sh
 . "$(dirname "${BASH_SOURCE[0]}")/docker.sh"
-# shellcheck source=install/lib/secrets.sh
+# shellcheck source=secrets.sh
 . "$(dirname "${BASH_SOURCE[0]}")/secrets.sh"
 
 SYNC_STORE_DIR="${SYNC_STORE_DIR:-/etc/amber-infra/sync-store}"
