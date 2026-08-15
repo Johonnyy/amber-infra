@@ -152,32 +152,63 @@ if [ "$SECRETS_READABLE" = "true" ]; then
   if [ "$SYNC_TOKEN" = "null" ]; then SYNC_TOKEN=""; fi
 fi
 
+# Why the store is not answering, specifically.
+#
+# `curl -fsS` fails on any non-2xx, so one message stood in for four different
+# problems with four different fixes: not deployed, not running, running but not
+# listening, and running but rejecting the credential. The last reads most like a
+# network fault and is not — a 401 means the token in secrets.yaml is not the token
+# the container was STARTED with, which is what happens whenever keys are regenerated
+# without restarting it.
 SYNC_REACHABLE=false
 SYNC_SERVERS='[]'
-if [ -n "$SYNC_TOKEN" ]; then
-  SYNC_BASE="$SYNC_LOCAL"
-  if ! curl -fsS -o /dev/null -m 3 "$SYNC_LOCAL/health" 2>/dev/null; then
-    SYNC_BASE="$SYNC_URL"
+SYNC_STATE="$(container_state sync-store)"
+SYNC_DETAIL=""
+
+if [ -z "$SYNC_TOKEN" ]; then
+  if [ "$SECRETS_READABLE" = "true" ]; then
+    SYNC_DETAIL="no token for 'amber' in sync_store.keys"
+    note "no sync-store token for 'amber' in secrets.yaml — the registry cannot be queried."
   fi
-  if RAW="$(curl -fsS -m 6 -H "Authorization: Bearer $SYNC_TOKEN" "$SYNC_BASE/servers" 2>/dev/null)"; then
-    SYNC_REACHABLE=true
-    # The store answers either {"servers":[…]} or a bare array. Accept both, exactly
-    # as agent-mcp-py's PeerRegistry.refresh does.
-    SYNC_SERVERS="$(printf '%s' "$RAW" | jq -c '(.servers // .) | map({
-        name: .name,
-        baseUrl: (.base_url // ""),
-        lastSeen: (.last_seen // null),
-        stale: (.stale // false)
-      })' 2>/dev/null || echo '[]')"
+elif [ "$SYNC_STATE" = "missing" ]; then
+  SYNC_DETAIL="not deployed on this box"
+  note "the sync-store is not deployed on this box yet, so nothing has registered. install.sh brings it up on a core box."
+elif [ "$SYNC_STATE" != "running" ]; then
+  SYNC_DETAIL="container is $SYNC_STATE"
+  note "the sync-store container is $SYNC_STATE, not running. See: docker logs sync-store --tail 50"
+else
+  # It is running, so ask it on loopback. Going through the public URL first would
+  # fold DNS, Caddy and TLS into a question about the store itself.
+  LOCAL_HEALTH="$(http_status "$SYNC_LOCAL/health")"
+  if [ "$LOCAL_HEALTH" != "200" ]; then
+    SYNC_DETAIL="running but not answering on $SYNC_LOCAL/health"
+    note "the sync-store container is running but nothing answers on $SYNC_LOCAL/health (got ${LOCAL_HEALTH:-no response}). It may still be starting, or bound to a port other than sync_store.port. Check: docker logs sync-store --tail 50"
   else
-    if [ "$(container_state sync-store)" = "missing" ]; then
-      note "the sync-store is not deployed on this box yet, so nothing has registered. install.sh brings it up on a core box."
-    else
-      note "the sync-store container exists but did not answer at $SYNC_BASE/servers — peer registration state is unknown."
-    fi
+    SERVERS_BODY="$(mktemp)"
+    SERVERS_CODE="$(curl -s -o "$SERVERS_BODY" -m 6 -w '%{http_code}' -H "Authorization: Bearer $SYNC_TOKEN" "$SYNC_LOCAL/servers" 2>/dev/null || true)"
+    case "$SERVERS_CODE" in
+      200)
+        SYNC_REACHABLE=true
+        # The store answers either {"servers":[…]} or a bare array. Accept both,
+        # exactly as agent-mcp-py's PeerRegistry.refresh does.
+        SYNC_SERVERS="$(jq -c '(.servers // .) | map({
+            name: .name,
+            baseUrl: (.base_url // ""),
+            lastSeen: (.last_seen // null),
+            stale: (.stale // false)
+          })' "$SERVERS_BODY" 2>/dev/null || echo '[]')"
+        ;;
+      401)
+        SYNC_DETAIL="healthy, but rejecting amber's token"
+        note "the sync-store is running and healthy but returned 401 for amber's token. The container reads SYNC_STORE_KEYS from its env file at STARTUP, so a token regenerated in secrets.yaml since then is not the one it is checking against. Re-run install.sh here, or: docker compose -f /etc/amber-infra/sync-store/docker-compose.prod.yml up -d --force-recreate"
+        ;;
+      *)
+        SYNC_DETAIL="healthy, but /servers returned ${SERVERS_CODE:-no response}"
+        note "the sync-store is healthy but GET /servers returned ${SERVERS_CODE:-no response}. Check: docker logs sync-store --tail 50"
+        ;;
+    esac
+    rm -f "$SERVERS_BODY"
   fi
-elif [ "$SECRETS_READABLE" = "true" ]; then
-  note "no sync-store token for 'amber' in secrets.yaml — the registry cannot be queried."
 fi
 
 # ==== which box is this ======================================================
@@ -231,6 +262,54 @@ if [ -n "$PRIMARY" ] && [ "$SECRETS_READABLE" = "true" ]; then
   done < <(yq -r '.apps // {} | keys | .[]' "$SECRETS_FILE" 2>/dev/null || true)
 fi
 
+
+# ==== dns ====================================================================
+# Do the records this box needs actually point at it?
+#
+# Listing what you need is not the same as checking it, and the difference is the
+# whole cost: Caddy asks for a certificate the moment a site block appears, and
+# Let's Encrypt rate-limits failures per domain. install.sh checks this in preflight,
+# but by then you are already running an install. Doing it here means the answer is
+# on screen before you decide to.
+#
+# Every name is resolved through this box's own resolver, which is the one Caddy will
+# use — checking from anywhere else would be answering a different question.
+
+PUBLIC_IP="$(curl -fsS --max-time 5 https://api.ipify.org 2>/dev/null || true)"
+[ -n "$PUBLIC_IP" ] || PUBLIC_IP="$(curl -fsS --max-time 5 https://ifconfig.me 2>/dev/null || true)"
+
+dns_record_json() {  # dns_record_json NAME WHY
+  local name="$1" why="$2" addresses points_here=false
+  addresses="$(getent ahostsv4 "$name" 2>/dev/null | awk '{print $1}' | sort -u || true)"
+  if [ -n "$PUBLIC_IP" ] && printf '%s' "$addresses" | grep -qx "$PUBLIC_IP"; then
+    points_here=true
+  fi
+  jq -n \
+    --arg     name      "$name" \
+    --arg     why       "$why" \
+    --argjson points    "$points_here" \
+    --argjson addresses "$(printf '%s' "$addresses" | sed '/^$/d' | jq -Rn '[inputs]')" \
+    '{name: $name, why: $why, addresses: $addresses, pointsHere: $points}'
+}
+
+dns_json() {
+  {
+    if [ "$SECRETS_READABLE" = "true" ]; then
+      while IFS= read -r _a; do
+        [ -n "$_a" ] || continue
+        _s="$(sget ".apps.\"$_a\".server")"
+        [ -z "$_s" ] || [ "$_s" = "$SERVER_LABEL" ] || continue
+        _d="$(sget ".apps.\"$_a\".domain")"
+        [ -n "$_d" ] && dns_record_json "$_d" "$_a"
+      done < <(yq -r '.apps // {} | keys | .[]' "$SECRETS_FILE" 2>/dev/null || true)
+    fi
+    if [ "$(sget '.infra.role' core)" = "core" ] && [ -n "$PRIMARY" ]; then
+      dns_record_json "sync.$PRIMARY" "the registry"
+    fi
+  } | jq -sc '.'
+}
+
+DNS_RECORDS="$(dns_json)"
 
 # ==== the catalogue ==========================================================
 # What this checkout can install: every directory carrying a docker-compose.prod.yml.
@@ -407,11 +486,16 @@ port_holder() {  # port_holder PORT -> the process holding it, or ""
   ss -lntp 2>/dev/null | awk -v p=":$1" '$4 ~ p" *$" {print $NF}' | head -n1 || true
 }
 
+# Active or enabled only. `list-unit-files` also lists units that are installed and
+# disabled, which is what a MIGRATED box looks like — reporting those kept the
+# migration card on screen forever, describing work that was already done.
 HOST_UNITS='[]'
 if have systemctl; then
-  HOST_UNITS="$(systemctl list-unit-files --type=service --no-legend --no-pager 2>/dev/null \
-    | awk '{print $1}' | sed 's/\.service$//' \
-    | grep -xE 'amber|caddy|sync-store' | sort -u | jq -Rn '[inputs]' 2>/dev/null || echo '[]')"
+  HOST_UNITS="$(for _u in amber caddy sync-store; do
+      if systemctl is-active --quiet "$_u" 2>/dev/null || systemctl is-enabled --quiet "$_u" 2>/dev/null; then
+        echo "$_u"
+      fi
+    done | jq -Rn '[inputs]' 2>/dev/null || echo '[]')"
 fi
 
 CADDY_CONTAINER=false
@@ -498,6 +582,10 @@ jq -n \
   --argjson syncUrl         "$(jnul "$SYNC_URL")" \
   --argjson syncReachable   "$SYNC_REACHABLE" \
   --argjson syncServers     "$SYNC_SERVERS" \
+  --arg     syncState       "$SYNC_STATE" \
+  --argjson syncDetail      "$(jnul "$SYNC_DETAIL")" \
+  --argjson publicIp        "$(jnul "$PUBLIC_IP")" \
+  --argjson dnsRecords      "$DNS_RECORDS" \
   --argjson history         "$JOURNAL" \
   --arg     backupTarget    "$BACKUP_TARGET" \
   --argjson backupCount     "${BACKUP_COUNT:-0}" \
@@ -505,7 +593,7 @@ jq -n \
   --argjson warnings        "$WARNINGS" \
   '{
      installed: true,
-     schema: 5,
+     schema: 6,
      repoRoot: $repoRoot, commit: $commit, role: $role, primaryDomain: $primaryDomain,
      docker: $docker, compose: $compose,
      tools: $tools,
@@ -521,7 +609,9 @@ jq -n \
      secretsReadable: $secretsReadable,
      apps: $apps,
      caddy: { running: ($caddyState == "running"), health: $caddyHealth, sites: $caddySites },
-     syncStore: { url: $syncUrl, reachable: $syncReachable, servers: $syncServers },
+     syncStore: { url: $syncUrl, reachable: $syncReachable, servers: $syncServers,
+                  containerState: $syncState, detail: $syncDetail },
+     dns: { publicIp: $publicIp, records: $dnsRecords },
      history: $history,
      backups: { target: $backupTarget, count: $backupCount, newest: $backupNewest },
      warnings: $warnings
