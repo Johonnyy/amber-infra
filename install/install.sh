@@ -101,8 +101,16 @@ if [ ! -f "$SECRETS_FILE" ]; then
   run install -m 600 "$REPO_ROOT/secrets/secrets.example.yaml" "$SECRETS_FILE"
   die "wrote a starter secrets file to $SECRETS_FILE.
 
-     Fill in every CHANGEME (generate each with: openssl rand -hex 32), set
-     infra.acme_email and infra.primary_domain, then re-run this command.
+     Fill in every CHANGEME, set infra.acme_email and infra.primary_domain, then
+     re-run this command.
+
+     The placeholder says which generator to use, because they are not
+     interchangeable:
+       CHANGEME-openssl-rand-hex-32   openssl rand -hex 32
+       CHANGEME-fernet-generate-key   python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\"
+     A Fernet key is 32 bytes of urlsafe base64, not hex. Bloom rejects a hex
+     string at startup rather than storing an OAuth token it could not protect.
+     Anything else is an API key you obtain from the provider.
 
      Stopping rather than guessing: a generated secret that is not in this file is
      a secret that is not in your backups."
@@ -176,15 +184,30 @@ step "Wiring $APP into the sync-store"
 APP_TOKEN="$(sync_store_token_for "$APP")"
 SYNC_URL="$(secrets_require '.sync_store.url')"
 
-# Amber owns a single AMBER_ prefix for three consumers (herself, agent_runtime,
-# agent_mcp) and constructs both libraries' settings from it with _env_file=None —
-# AGENT_MCP_* keys in her env file would be silently ignored. Every other app is a
-# plain agent-mcp-py consumer and reads AGENT_MCP_*.
-if [ "$APP" = "amber" ]; then
-  PREFIX="AMBER_MCP"
-else
+# Which prefix these three keys are written under is the app's decision, not ours.
+#
+# Most apps embed agent-mcp-py and nothing else, so they read AGENT_MCP_* and the
+# default is right. An app that embeds *both* libraries — agent-mcp-py and
+# agent-runtime — cannot: it owns a single prefix and builds both libraries'
+# settings from it with `_env_file=None`, precisely so two config surfaces can never
+# disagree about which database to write. Amber does this (AMBER_) and so does Bloom
+# (BLOOM_).
+#
+# Getting this wrong fails **silently**, which is why it is declared rather than
+# guessed. Both apps' Settings classes use `extra="ignore"`, so an AGENT_MCP_* key
+# in their env file is not an error — it is simply not read. The app starts, serves
+# normally, and never registers with the sync-store, because its public URL is empty
+# and registration is skipped without one. Nothing discovers it and nothing says why.
+#
+# This used to be `if [ "$APP" = "amber" ]`, which was correct for the one app that
+# existed and wrong for the next one.
+PREFIX="$(secrets_get ".apps.\"$APP\".env_prefix")"
+if [ -z "$PREFIX" ]; then
   PREFIX="AGENT_MCP"
+  # A file predating env_prefix still installs Amber correctly. New apps declare it.
+  [ "$APP" = "amber" ] && PREFIX="AMBER_MCP"
 fi
+PREFIX="${PREFIX%_}"
 env_set "$ENV_FILE" "${PREFIX}_PUBLIC_URL" "https://$DOMAIN"
 env_set "$ENV_FILE" "${PREFIX}_SYNC_STORE_URL" "$SYNC_URL"
 env_set "$ENV_FILE" "${PREFIX}_SYNC_STORE_TOKEN" "$APP_TOKEN"

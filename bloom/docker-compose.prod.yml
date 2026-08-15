@@ -1,0 +1,45 @@
+# Bloom, the agent spawner. Deployed to /etc/amber-infra/bloom/docker-compose.prod.yml
+# by install.sh, which rewrites the image line from apps.bloom.image in secrets.yaml.
+#
+# The image tag is PINNED and changes only through a deliberate edit or
+# deploy/rollback.sh. Never `latest`: a restart must never change the code.
+#
+# Bloom is a core service — it holds the user's OAuth grants and is what Amber
+# delegates to, so it belongs on Server A beside her and the sync-store, and it is
+# exact-pinned rather than following a moving tag.
+services:
+  bloom:
+    image: ghcr.io/johonnyy/bloom:0.1.0
+    container_name: bloom
+    restart: unless-stopped
+    env_file:
+      - ./bloom.env               # rendered from secrets.yaml, chmod 600 root:root
+    ports:
+      # Loopback only; Caddy (host networking) terminates TLS and proxies here.
+      # Two things on this service need the edge to stream rather than buffer: the
+      # MCP endpoint at /mcp (streamable HTTP, i.e. SSE) and the live run trace at
+      # /admin/runs/{id}/events. The generic caddy/snippets/_template.caddy already
+      # carries `import streaming`, which is why Bloom needs no committed snippet.
+      - "127.0.0.1:8010:8010"
+    volumes:
+      # bloom.db lives here: agent configs, OAuth connections (encrypted), runs and
+      # their event log, plus agent_mcp_usage and agent_runtime_usage as co-tenants.
+      #
+      # Losing this volume is not a cache miss. It loses every configured agent and
+      # every connected account, and the accounts cannot be restored from anywhere
+      # else — they have to be re-authorised through a browser, one at a time. It is
+      # a backup.sqlite target in secrets.yaml for that reason.
+      - bloom-data:/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    labels:
+      # Core service: exact-pinned and updated deliberately, never by Watchtower.
+      # See deploy/watchtower/docker-compose.watchtower.yml.
+      com.centurylinklabs.watchtower.enable: "false"
+
+volumes:
+  bloom-data:
+    name: bloom-data

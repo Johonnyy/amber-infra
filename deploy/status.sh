@@ -124,6 +124,13 @@ if [ "$SECRETS_READABLE" = "true" ] && have jq; then
     | jq -c '[paths(type == "string" and test("CHANGEME")) | join(".")]' 2>/dev/null || echo '[]')"
   # Decided on the value for the first kind and on the last path segment for the
   # second, so `apps.amber.env.AMBER_MCP_KEYS` is recognised wherever it appears.
+  #
+  # "Generatable" is not one command. The placeholder value says which:
+  # CHANGEME-openssl-rand-hex-32 means `openssl rand -hex 32`, and
+  # CHANGEME-fernet-generate-key means a Fernet key — 32 bytes of urlsafe base64,
+  # which Bloom validates at startup and which a hex string is not. A setup screen
+  # offering one button for this whole group will hand someone a value the service
+  # refuses to boot with, so branch on the placeholder, not on the category.
   GEN_PATHS="$(printf '%s' "$SECRETS_JSON" | jq -c '
       [paths(type == "string" and test("CHANGEME")) as $p
        | select((getpath($p) | test("CHANGEME-openssl-rand-hex"))

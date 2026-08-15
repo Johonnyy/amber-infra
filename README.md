@@ -18,6 +18,7 @@ registers herself.
 caddy/         the TLS edge: one Caddyfile, one snippet per app
 sync-store/    the registry + Aperture's config sync   <- start here
 amber/         Amber's image, compose, and self-update units
+bloom/         Bloom's compose — the agent spawner, core service on Server A
 secrets/       secrets.example.yaml — the single source for every generated .env
 install/       install.sh, uninstall.sh, and the shell library they share
 deploy/        rollback.sh, update-amber.sh, migrate-amber-db.sh, status.sh, watchtower
@@ -27,9 +28,13 @@ ci-templates/  ci.yml and release.yml, to copy into each repo
 
 ## The shape of a deployment
 
-Two OVH boxes. **Server A** (core, always on): Caddy, sync-store, Amber, and later
-agent-spawner and notification-relay. **Server B**: individual app agents. One Caddy
-per box, one snippet per app, one subdomain each.
+Two OVH boxes. **Server A** (core, always on): Caddy, sync-store, Amber, Bloom, and
+later notification-relay. **Server B**: individual app agents. One Caddy per box, one
+snippet per app, one subdomain each.
+
+Bloom is on Server A rather than B because of what it holds: the user's OAuth grants,
+and the thing Amber delegates to. A box that has Amber but not Bloom is a box where
+half her capabilities silently do not exist.
 
 Caddy runs with `network_mode: host` and every app publishes on `127.0.0.1:<port>`
 only. So every upstream is `reverse_proxy 127.0.0.1:PORT` regardless of what serves
@@ -44,6 +49,14 @@ Three things, and `install.sh` checks the first two before it touches the box:
    pinned image, and its `*_MCP_KEYS` token. Aperture's Servers tab writes this for
    you (Declare); the commented template at the bottom of `secrets.example.yaml` is
    the same thing by hand.
+
+   Set **`env_prefix`** too if the app embeds `agent-runtime` as well as
+   `agent-mcp-py`. Such an app owns a single prefix and builds both libraries'
+   settings from it, so the three discovery keys have to be written under that
+   prefix — `AMBER_MCP` for Amber, `BLOOM_MCP` for Bloom. The default, `AGENT_MCP`,
+   is right for every plain agent-mcp-py app. Getting it wrong fails **silently**:
+   the keys land under a prefix the app ignores, so it starts, serves, and never
+   registers, and the only symptom is an empty row in `status.sh`.
 2. **`<name>/docker-compose.prod.yml` committed to this repo.** There is deliberately
    no generic template. An app's volume, health check and loopback port binding are
    its own, and a rendered guess is how you get a container that starts and stores
