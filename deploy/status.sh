@@ -696,6 +696,36 @@ app_json() {  # app_json NAME
       | head -n1 | tr -d '"')")"
   fi
 
+  # WHY it did not register, from the only place that answer has ever existed.
+  #
+  # agent_mcp's register() logs and swallows every failure by contract, so the reason
+  # never reaches the store, never reaches this document, and never reaches the GUI. It
+  # exists solely in the app's own log, and the only way to read it was to SSH in and
+  # grep — which is precisely what made "unregistered" a dead end with no next move.
+  # sync_store_wait_for_registration already tells you to run this command by hand; this
+  # runs it for you.
+  #
+  # The lines it catches, all of which name a different repair:
+  #   "Registered with the sync store at ..."          it worked
+  #   "No public URL configured ...; skipping"         never attempted, env is wrong
+  #   "Sync store unreachable (...): ..."              attempted and failed, with why
+  #   "MCP server disabled (...)"                      the server never mounted at all
+  #   "MCP server mounted at /mcp"                     it did mount
+  #
+  # Bounded and redacted: 400 lines back, last 4 matches, 300 chars each, and any
+  # token-shaped run replaced — a third-party exception repr is not something this
+  # script controls the contents of, and it is being put on a screen.
+  local reg_log='[]'
+  if [ "$state" != "missing" ] && have docker; then
+    reg_log="$(docker logs "$name" --tail 400 2>&1 \
+      | grep -iE 'sync store|mcp server' \
+      | tail -n 4 \
+      | cut -c1-300 \
+      | sed -E 's/[A-Za-z0-9_-]{32,}/<redacted>/g' \
+      | jq -Rn '[inputs]' 2>/dev/null || echo '[]')"
+    [ -n "$reg_log" ] || reg_log='[]'
+  fi
+
   local manifest env_prefix_declared env_prefix_rendered
   manifest="$(manifest_json "$name")"
   env_prefix_declared="$(sget ".apps.\"$name\".env_prefix")"
@@ -718,6 +748,7 @@ app_json() {  # app_json NAME
     --argjson compose  "$(jnul "$compose")" \
     --argjson startedAt "$(jnul "$started")" \
     --argjson syncFp    "$(jnul "$sync_fp")" \
+    --argjson regLog    "$reg_log" \
     --argjson http     "${http:-null}" \
     --argjson envKeys  "$env_keys" \
     --argjson env      "$(app_env_json "$name" "$manifest")" \
@@ -741,7 +772,8 @@ app_json() {  # app_json NAME
        envPrefix: (if ($manifest.envPrefix // "") == "" then null else $manifest.envPrefix end),
        envPrefixDeclared: $prefixDeclared,
        envPrefixRendered: $prefixRendered,
-       syncTokenFingerprint: $syncFp
+       syncTokenFingerprint: $syncFp,
+       registrationLog: $regLog
      }'
 }
 
