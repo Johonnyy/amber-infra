@@ -116,6 +116,14 @@ esac
 preflight_ports
 preflight_upstream "$APP" "$UPSTREAM"
 preflight_dns "$DOMAIN"
+# The one hostname nobody remembers, because nobody types it: on a core box the
+# sync-store gets a site at sync.<primary_domain>, derived rather than passed. Without
+# a record for it, caddy_add_site adds the block anyway and you find out from a
+# two-minute wait_for_http timeout and a warning — after ACME has already burned an
+# attempt on it.
+if [ "$ROLE" = "core" ]; then
+  preflight_dns "sync.$(secrets_get '.infra.primary_domain')"
+fi
 
 # ==== 2. TLS edge ============================================================
 ensure_caddy "$ACME_EMAIL"

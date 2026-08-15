@@ -176,12 +176,67 @@ elif [ "$SECRETS_READABLE" = "true" ]; then
   note "no sync-store token for 'amber' in secrets.yaml — the registry cannot be queried."
 fi
 
+# ==== which box is this ======================================================
+# `infra.server` labels this box; `apps.<name>.server` says which box an app belongs
+# on. Nothing in this repo consumed either field before now — `server:` was a comment
+# with syntax. It gets a meaning here so that a two-server split stops being something
+# you hold in your head.
+#
+# Defaulted from `role` when unset, so an existing secrets.yaml keeps working: core is
+# server a, app is server b, which is what the README already describes.
+#
+# An app whose `server` is unset, or whose value matches nothing, is treated as
+# BELONGING HERE. Deciding otherwise would hide an app from the only screen that could
+# tell you it exists, on the strength of a field that until today meant nothing.
+
+SERVER_LABEL="$(sget '.infra.server')"
+if [ -z "$SERVER_LABEL" ]; then
+  case "$(sget '.infra.role' core)" in
+    core) SERVER_LABEL=a ;;
+    *)    SERVER_LABEL=b ;;
+  esac
+fi
+
+# ==== the catalogue ==========================================================
+# What this checkout can install: every directory carrying a docker-compose.prod.yml.
+#
+# The repo is the catalogue. install.sh already refuses any app without one of these,
+# so their presence is not a hint, it is the definition — and the file carries the
+# pinned image and the loopback port too, which is everything an install needs except
+# a hostname.
+#
+# caddy and sync-store are excluded: they are the edge and the registry, brought up by
+# ensure_caddy and ensure_sync_store, and `install.sh --app sync-store` is not a thing.
+
+catalogue_json() {
+  local dir name compose image upstream
+  for dir in "$REPO_ROOT"/*/; do
+    [ -d "$dir" ] || continue
+    name="$(basename "$dir")"
+    case "$name" in caddy|sync-store) continue ;; esac
+    compose="${dir}docker-compose.prod.yml"
+    [ -f "$compose" ] || continue
+    image="$(image_of "$compose")"
+    upstream="$(grep -oE '127\.0\.0\.1:[0-9]+' "$compose" | head -n1 || true)"
+    jq -n --arg name "$name" \
+          --argjson image "$(jnul "$image")" \
+          --argjson upstream "$(jnul "$upstream")" \
+          '{name: $name, image: $image, upstream: $upstream}'
+  done | jq -sc '.'
+}
+
+CATALOGUE="$(catalogue_json)"
+
 # ==== apps ===================================================================
 # The union of what secrets.yaml declares and what is actually deployed under
 # /etc/amber-infra, so an app stood up by hand still appears rather than being
 # quietly absent from a screen that claims to list everything.
 
 app_names() {
+  # Declared in config, deployed on disk, or available in the checkout. All three,
+  # because each answers a different question and an app can be in any one of them
+  # alone: inherited from an old example, stood up by hand, or shipped in the repo
+  # and not installed yet.
   if [ "$SECRETS_READABLE" = "true" ]; then
     yq -r '.apps // {} | keys | .[]' "$SECRETS_FILE" 2>/dev/null || true
   fi
@@ -191,6 +246,7 @@ app_names() {
     [ -e "${dir}docker-compose.prod.yml" ] || continue
     basename "$dir"
   done
+  printf '%s' "$CATALOGUE" | jq -r '.[].name'
 }
 
 # The editable source of an app's environment: `apps.<name>.env` in secrets.yaml,
@@ -238,6 +294,22 @@ app_json() {  # app_json NAME
   domain="$(sget ".apps.\"$name\".domain")"
   upstream="$(sget ".apps.\"$name\".upstream")"
 
+  # Assignment, and the two facts that are not runtime state: is it declared in this
+  # box's config, and can this checkout install it at all.
+  local server declared available this_box
+  server="$(sget ".apps.\"$name\".server")"
+  declared=false
+  if [ "$SECRETS_READABLE" = "true" ] && yq -e ".apps.\"$name\"" "$SECRETS_FILE" >/dev/null 2>&1; then
+    declared=true
+  fi
+  available=false
+  if printf '%s' "$CATALOGUE" | jq -e --arg n "$name" 'any(.name == $n)' >/dev/null 2>&1; then
+    available=true
+  fi
+  # Unset, or a label nobody recognises, means here. See the note above SERVER_LABEL.
+  this_box=true
+  if [ -n "$server" ] && [ "$server" != "$SERVER_LABEL" ]; then this_box=false; fi
+
   http=""
   if [ -n "$domain" ]; then http="$(http_status "https://$domain/health")"; fi
   if [ "$http" = "000" ]; then http=""; fi
@@ -264,6 +336,10 @@ app_json() {  # app_json NAME
     --argjson http     "${http:-null}" \
     --argjson envKeys  "$env_keys" \
     --argjson env      "$(app_env_json "$name")" \
+    --argjson server   "$(jnul "$server")" \
+    --argjson thisBox  "$this_box" \
+    --argjson declared "$declared" \
+    --argjson available "$available" \
     --argjson registry "$SYNC_SERVERS" \
     '($registry | map(select(.name == $name)) | .[0]) as $r | {
        name: $name, domain: $domain, upstream: $upstream,
@@ -271,7 +347,8 @@ app_json() {  # app_json NAME
        container: $state, health: $health,
        envFile: $envFile, composeFile: $compose,
        registered: ($r != null), lastSeen: ($r.lastSeen // null), stale: ($r.stale // false),
-       httpStatus: $http, envKeys: $envKeys, env: $env
+       httpStatus: $http, envKeys: $envKeys, env: $env,
+       server: $server, thisBox: $thisBox, declared: $declared, available: $available
      }'
 }
 
@@ -365,6 +442,8 @@ jq -n \
   --argjson placeholdersManual "$PLACEHOLDERS_MANUAL" \
   --argjson acmeEmailSet    "$ACME_SET" \
   --argjson hostServices    "$HOST_SERVICES" \
+  --arg     serverLabel     "$SERVER_LABEL" \
+  --argjson catalogue       "$CATALOGUE" \
   --argjson settings        "$(jq -n \
       --argjson acmeEmail     "$(jnul "$ACME_EMAIL")" \
       --argjson primaryDomain "$(jnul "$(sget '.infra.primary_domain')")" \
@@ -391,7 +470,7 @@ jq -n \
   --argjson warnings        "$WARNINGS" \
   '{
      installed: true,
-     schema: 4,
+     schema: 5,
      repoRoot: $repoRoot, commit: $commit, role: $role, primaryDomain: $primaryDomain,
      docker: $docker, compose: $compose,
      tools: $tools,
@@ -402,6 +481,8 @@ jq -n \
      },
      settings: $settings,
      hostServices: $hostServices,
+     serverLabel: $serverLabel,
+     catalogue: $catalogue,
      secretsReadable: $secretsReadable,
      apps: $apps,
      caddy: { running: ($caddyState == "running"), health: $caddyHealth, sites: $caddySites },
