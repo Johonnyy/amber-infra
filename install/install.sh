@@ -199,10 +199,29 @@ step "Wiring $APP into the sync-store"
 APP_TOKEN="$(sync_store_token_for "$APP")"
 SYNC_URL="$(secrets_require '.sync_store.url')"
 
+# Read before the store starts, for the same reason APP_TOKEN is minted before it.
+# This used to sit down beside the verification step, i.e. AFTER ensure_sync_store —
+# so on a box with no `amber` entry it minted one the running store had never heard
+# of, and then verified with it. The check 401s, and the message blames the app.
+# It never mints now; a box without the key says so instead of inventing one.
+ADMIN_TOKEN="$(sync_store_admin_token)"
+
 if [ "$ROLE" = "core" ]; then
   ensure_sync_store
   caddy_add_site sync-store "sync.$(secrets_get '.infra.primary_domain')" \
       "127.0.0.1:$(secrets_get '.sync_store.port' 8081)"
+else
+  # The store is not here, so nothing on this box can teach it this key. The token was
+  # just written into THIS box's secrets.yaml and the store reads the CORE box's — so
+  # without the same entry over there, $APP will register-401 forever and look exactly
+  # like every other unregistered app. Nothing said so before; it does now, at the one
+  # moment someone can act on it.
+  warn "this box is role: $ROLE, so the sync-store is not here.
+     '$APP' will only be able to register once the CORE box's secrets.yaml carries the
+     same sync_store.keys entry for it, and its store has been reloaded there:
+         sync_store.keys:  - name: $APP
+                             token: $APP_TOKEN
+         then on the core box:  sudo bash deploy/reload-registry.sh"
 fi
 
 # Which prefix these three keys are written under is the app's decision, not ours.
@@ -316,9 +335,15 @@ caddy_add_site "$APP" "$DOMAIN" "$UPSTREAM"
 # Verify, don't assume. install.sh never POSTs a descriptor on the app's behalf:
 # registration is agent_mcp's job on startup, and a registry entry written from bash
 # would outlive the app being broken.
-ADMIN_TOKEN="$(sync_store_token_for amber)"
 if [ -n "$DESCRIPTOR" ]; then
   sync_store_post_descriptor "$DESCRIPTOR" "$APP_TOKEN"
+elif [ -z "$ADMIN_TOKEN" ]; then
+  # Say which question could not be asked. Reporting "not registered" on the strength
+  # of a request that was never authorised is the failure mode this whole change is
+  # about, and repeating it here would be its own small joke.
+  warn "cannot verify that '$APP' registered: there is no 'amber' entry in
+     sync_store.keys, so the registry cannot be queried from this box. $APP itself is
+     wired correctly. Add the key and run: bash deploy/reload-registry.sh"
 else
   sync_store_wait_for_registration "$APP" 60 "$ADMIN_TOKEN" || true
 fi

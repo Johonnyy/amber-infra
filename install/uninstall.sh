@@ -70,8 +70,17 @@ remove_app() {
   # Deregister so no agent keeps trying to call something that is gone. Best effort:
   # if the store is down, the entry is stale rather than harmful — discovery fails
   # open by design.
-  if sync_store_up; then
-    sync_store_deregister "$app" "$(sync_store_token_for amber)"
+  # Read-only: sync_store_token_for would MINT a key and write it into secrets.yaml as
+  # a side effect of removing an app, which is both surprising and useless — a token
+  # invented now is one the running store has never heard of, so the deregistration
+  # would 401 anyway.
+  local admin
+  admin="$(sync_store_admin_token)"
+  if [ -z "$admin" ]; then
+    warn "no 'amber' entry in sync_store.keys, so '$app' cannot be deregistered from here.
+     It will linger in the registry until removed by hand."
+  elif sync_store_up; then
+    sync_store_deregister "$app" "$admin"
   else
     warn "sync-store is not reachable — '$app' will linger in the registry until it is removed by hand"
   fi

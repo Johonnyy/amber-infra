@@ -129,6 +129,23 @@ sync_store_token_for() {  # sync_store_token_for APP -> the bearer token, genera
   echo "$token"
 }
 
+sync_store_admin_token() {  # -> amber's bearer, or "" — NEVER mints one
+  # The read-only twin of sync_store_token_for, for the callers that only want to
+  # *query* the registry: install.sh's verification step and uninstall.sh's
+  # deregistration.
+  #
+  # Using the minting version there was a quiet trap. Both run after the store has
+  # already been rendered and started, so on a box with no `amber` entry they invented
+  # one the running store had never heard of — and then used it. The verification
+  # then 401s and reports "'bloom' has not appeared in the registry", blaming the app
+  # for what is the checker's own credential being unknown. Worse, uninstall.sh wrote
+  # a brand-new key into secrets.yaml as a side effect of REMOVING something.
+  local token
+  token="$(yq -r '.sync_store.keys[]? | select(.name == "amber") | .token' "$SECRETS_FILE" 2>/dev/null | head -n1 || true)"
+  case "$token" in null|*CHANGEME*) token="" ;; esac
+  echo "$token"
+}
+
 sync_store_wait_for_registration() {  # ... NAME TIMEOUT_S ADMIN_TOKEN
   local name="$1" timeout="${2:-60}" token="$3" waited=0 url
   url="$(sync_store_base_url)/servers"

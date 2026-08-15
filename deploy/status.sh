@@ -21,6 +21,11 @@
 # store and an unreadable secrets file are all reported inside the document, because
 # a status command that dies has told you nothing about the other twelve things.
 #
+# Schema 10 adds the registry's key list from BOTH sides — what secrets.yaml declares
+# and what the running container was actually started with — as fingerprints, plus
+# `startedAt` per container. Those are what let a client say *why* an app is
+# unregistered instead of listing the four things it might be.
+#
 # Without privilege to read /etc/amber-infra/secrets.yaml it still works: it reports
 # `secretsReadable: false` and falls back to what Docker alone can say. The one thing
 # it will not do is print a secret. Values under `apps.*.env` and every token are
@@ -78,6 +83,61 @@ sget() {  # sget YQ_PATH [default] — "" rather than a fatal error when unavail
 
 http_status() {  # http_status URL -> the code, or "" when nothing answered
   curl -fsS -o /dev/null -m 6 -w '%{http_code}' "$1" 2>/dev/null || true
+}
+
+# --- key fingerprints --------------------------------------------------------
+# The one thing this document could not previously say: which key list the registry
+# container is *actually running*. It reads SYNC_STORE_KEYS once, at startup, so a
+# token minted afterwards is one it has never heard of — and the only symptom is a
+# 401 that agent_mcp's register() swallows. Comparing the running list against the
+# declared one turns that from a guess into a fact.
+#
+# Emitting the tokens themselves is obviously out. Emitting a fingerprint is not:
+# eight hex of a sha256 identifies a key well enough to *compare* two lists while
+# being no step at all toward reconstructing it. The convention is already in the
+# store — sync-store/app/auth.py:66 labels a bare token exactly this way.
+
+fingerprint() {  # fingerprint TOKEN -> 8 hex chars, or "" if nothing here can hash
+  # Empty in, empty out. Without this an unset token hashes to e3b0c442 — a perfectly
+  # valid-looking digest that would read as "this app has a key" and compare unequal
+  # to every real one, i.e. the wrong diagnosis with total confidence.
+  [ -n "${1:-}" ] || return 0
+  if   have sha256sum; then printf '%s' "$1" | sha256sum      | cut -c1-8
+  elif have shasum;    then printf '%s' "$1" | shasum -a 256  | cut -c1-8
+  elif have openssl;   then printf '%s' "$1" | openssl dgst -sha256 -r | cut -c1-8
+  fi
+}
+
+# A `name:token,name:token` list reduced to [{name, fp}].
+#
+# The token lives in a shell local and dies there: only $name and the digest are ever
+# handed to jq. Read from a process substitution rather than a heredoc, because bash
+# spills a heredoc to a temp file on some builds and that file would hold every key.
+#
+# Entry parsing mirrors agent_mcp.parse_keys (sync-store/app/auth.py:71) — an entry
+# with no colon is a bare token, whose caller label *is* its fingerprint.
+key_list_json() {  # key_list_json "a:tok,b:tok" -> [{"name":…,"fp":…}]
+  local raw="$1" entry name token fp ph out='[]'
+  # `|| [ -n "$entry" ]` is not optional: `tr` leaves the final entry unterminated, and
+  # a bare `while read` drops it. Without this the LAST key in every list vanishes —
+  # silently, and most often it is the app just installed.
+  while IFS= read -r entry || [ -n "$entry" ]; do
+    entry="$(printf '%s' "$entry" | tr -d '[:space:]')"
+    [ -n "$entry" ] || continue
+    case "$entry" in
+      *:*) name="${entry%%:*}"; token="${entry#*:}" ;;
+      *)   name="";             token="$entry"      ;;
+    esac
+    [ -n "$token" ] || continue
+    fp="$(fingerprint "$token")"
+    [ -n "$name" ] || name="sha256:$fp"
+    # A CHANGEME token is a distinct finding with a distinct fix: the key was never
+    # filled in, so reloading the registry would only teach it the placeholder.
+    case "$token" in *CHANGEME*) ph=true ;; *) ph=false ;; esac
+    out="$(printf '%s' "$out" \
+      | jq -c --arg n "$name" --arg f "$fp" --argjson p "$ph" '. + [{name: $n, fp: $f, placeholder: $p}]')"
+  done < <(printf '%s' "$raw" | tr ',' '\n')
+  printf '%s' "$out"
 }
 
 # ==== secrets ================================================================
@@ -231,6 +291,63 @@ else
     esac
     rm -f "$SERVERS_BODY"
   fi
+fi
+
+# The key list, from both sides, so a consumer can tell the four unregistered causes
+# apart instead of naming all four and hoping.
+#
+#   declared but not running -> the store was started before this key existed
+#   fingerprints disagree    -> the token was rotated since the store started
+#   both agree, not in /servers -> the app's own problem (prefix, public URL, booting)
+#
+# `readable` is true only when BOTH sides were actually read. An empty list from an
+# unreadable secrets file and an empty list from a store with no keys are the same
+# JSON and emphatically not the same finding.
+SYNC_KEYS_READABLE=false
+SYNC_KEYS_RUNNING='[]'
+SYNC_KEYS_DECLARED='[]'
+SYNC_STARTED_AT=""
+SYNC_RUNNING_OK=false
+SYNC_DECLARED_OK=false
+
+if have docker && [ "$SYNC_STATE" != "missing" ]; then
+  SYNC_STARTED_AT="$(docker container inspect -f '{{.State.StartedAt}}' sync-store 2>/dev/null || true)"
+  case "$SYNC_STARTED_AT" in 0001-01-01*) SYNC_STARTED_AT="" ;; esac
+  # `container inspect`, never bare `inspect` — see the note in app_json.
+  SYNC_RUNNING_RAW="$(docker container inspect -f '{{range .Config.Env}}{{println .}}{{end}}' sync-store 2>/dev/null \
+    | sed -n 's/^SYNC_STORE_KEYS=//p' | head -n1 || true)"
+  if [ -n "$SYNC_RUNNING_RAW" ]; then
+    SYNC_KEYS_RUNNING="$(key_list_json "$SYNC_RUNNING_RAW")"
+    SYNC_RUNNING_OK=true
+  fi
+  unset SYNC_RUNNING_RAW
+fi
+
+if [ "$SECRETS_READABLE" = "true" ]; then
+  # The same expression secrets_sync_store_keys renders into the env file, so the two
+  # sides of the comparison are produced the way install.sh produces the real one.
+  SYNC_DECLARED_RAW="$(yq -r '.sync_store.keys[]? | .name + ":" + .token' "$SECRETS_FILE" 2>/dev/null \
+    | paste -sd, - || true)"
+  if [ -n "$SYNC_DECLARED_RAW" ]; then
+    SYNC_KEYS_DECLARED="$(key_list_json "$SYNC_DECLARED_RAW")"
+    SYNC_DECLARED_OK=true
+  fi
+  unset SYNC_DECLARED_RAW
+fi
+
+if [ "$SYNC_RUNNING_OK" = "true" ] && [ "$SYNC_DECLARED_OK" = "true" ]; then
+  SYNC_KEYS_READABLE=true
+  # Worth a warning of its own: this is the state that makes an app look broken when
+  # the registry is the thing that needs restarting.
+  # Declared keys the running store either does not have, or has under a different
+  # fingerprint. Absent and stale are the same finding here: both are rejected.
+  SYNC_KEYS_DRIFT="$(jq -nc --argjson r "$SYNC_KEYS_RUNNING" --argjson d "$SYNC_KEYS_DECLARED" '
+      ($r | map({key: .name, value: .fp}) | from_entries) as $run
+      | [ $d[] | select($run[.name] != .fp) | .name ]' 2>/dev/null || echo '[]')"
+  if [ "$(printf '%s' "$SYNC_KEYS_DRIFT" | jq -r 'length')" != "0" ]; then
+    note "the sync-store is running an older key list than secrets.yaml declares ($(printf '%s' "$SYNC_KEYS_DRIFT" | jq -r 'join(", ")')). SYNC_STORE_KEYS is read at STARTUP, so those keys are rejected until it reloads: bash deploy/reload-registry.sh"
+  fi
+  unset SYNC_KEYS_DRIFT
 fi
 
 # ==== which box is this ======================================================
@@ -517,6 +634,12 @@ app_json() {  # app_json NAME
   [ -n "$state" ] || state=missing
   running="$(docker container inspect -f '{{.Config.Image}}' "$name" 2>/dev/null || true)"
   health="$(container_health "$name")"
+  # When it last started. Registration happens on startup and then only every 300s,
+  # so "not registered" 20 seconds after a restart and "not registered" an hour after
+  # one are different findings, and this is the only field that separates them.
+  local started
+  started="$(docker container inspect -f '{{.State.StartedAt}}' "$name" 2>/dev/null || true)"
+  case "$started" in 0001-01-01*) started="" ;; esac
 
   domain="$(sget ".apps.\"$name\".domain")"
   upstream="$(sget ".apps.\"$name\".upstream")"
@@ -562,6 +685,17 @@ app_json() {  # app_json NAME
   # itself. It is read here, where the file is already open and only key NAMES ever
   # leave: keyed off _SYNC_STORE_URL rather than _PUBLIC_URL because an app may have a
   # second, non-MCP *_PUBLIC_URL — Bloom's OAuth origin — and that one would match too.
+  # The fingerprint of the token this app is ACTUALLY presenting, out of its rendered
+  # .env. Compared against the sync_store.keys entry of the same name it separates two
+  # failures that look identical and have different repairs: the registry never heard
+  # of this key (reload the registry) versus the app is still presenting last week's
+  # (reconcile the app). Only the digest leaves this function.
+  local sync_fp=""
+  if [ -r "$env_file" ]; then
+    sync_fp="$(fingerprint "$(sed -n 's/^[A-Z][A-Z0-9_]*_SYNC_STORE_TOKEN=//p' "$env_file" 2>/dev/null \
+      | head -n1 | tr -d '"')")"
+  fi
+
   local manifest env_prefix_declared env_prefix_rendered
   manifest="$(manifest_json "$name")"
   env_prefix_declared="$(sget ".apps.\"$name\".env_prefix")"
@@ -582,6 +716,8 @@ app_json() {  # app_json NAME
     --arg     health   "$health" \
     --argjson envFile  "$(jnul "$env_file")" \
     --argjson compose  "$(jnul "$compose")" \
+    --argjson startedAt "$(jnul "$started")" \
+    --argjson syncFp    "$(jnul "$sync_fp")" \
     --argjson http     "${http:-null}" \
     --argjson envKeys  "$env_keys" \
     --argjson env      "$(app_env_json "$name" "$manifest")" \
@@ -596,7 +732,7 @@ app_json() {  # app_json NAME
     '($registry | map(select(.name == $name)) | .[0]) as $r | {
        name: $name, domain: $domain, upstream: $upstream,
        imagePinned: $pinned, imageRunning: $running,
-       container: $state, health: $health,
+       container: $state, health: $health, startedAt: $startedAt,
        envFile: $envFile, composeFile: $compose,
        registered: ($r != null), lastSeen: ($r.lastSeen // null), stale: ($r.stale // false),
        httpStatus: $http, envKeys: $envKeys, env: $env,
@@ -604,7 +740,8 @@ app_json() {  # app_json NAME
        manifest: $manifest,
        envPrefix: (if ($manifest.envPrefix // "") == "" then null else $manifest.envPrefix end),
        envPrefixDeclared: $prefixDeclared,
-       envPrefixRendered: $prefixRendered
+       envPrefixRendered: $prefixRendered,
+       syncTokenFingerprint: $syncFp
      }'
 }
 
@@ -726,6 +863,10 @@ jq -n \
   --argjson syncServers     "$SYNC_SERVERS" \
   --arg     syncState       "$SYNC_STATE" \
   --argjson syncDetail      "$(jnul "$SYNC_DETAIL")" \
+  --argjson syncStartedAt   "$(jnul "$SYNC_STARTED_AT")" \
+  --argjson syncKeysOk      "$SYNC_KEYS_READABLE" \
+  --argjson syncKeysRunning "$SYNC_KEYS_RUNNING" \
+  --argjson syncKeysDeclared "$SYNC_KEYS_DECLARED" \
   --argjson publicIp        "$(jnul "$PUBLIC_IP")" \
   --argjson dnsRecords      "$DNS_RECORDS" \
   --argjson history         "$JOURNAL" \
@@ -735,7 +876,7 @@ jq -n \
   --argjson warnings        "$WARNINGS" \
   '{
      installed: true,
-     schema: 9,
+     schema: 10,
      repoRoot: $repoRoot, commit: $commit, role: $role, primaryDomain: $primaryDomain,
      docker: $docker, compose: $compose,
      tools: $tools,
@@ -752,7 +893,10 @@ jq -n \
      apps: $apps,
      caddy: { running: ($caddyState == "running"), health: $caddyHealth, sites: $caddySites },
      syncStore: { url: $syncUrl, reachable: $syncReachable, servers: $syncServers,
-                  containerState: $syncState, detail: $syncDetail },
+                  containerState: $syncState, detail: $syncDetail,
+                  startedAt: $syncStartedAt,
+                  keys: { readable: $syncKeysOk,
+                          running: $syncKeysRunning, declared: $syncKeysDeclared } },
      dns: { publicIp: $publicIp, records: $dnsRecords },
      history: $history,
      backups: { target: $backupTarget, count: $backupCount, newest: $backupNewest },
