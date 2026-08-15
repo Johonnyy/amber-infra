@@ -27,8 +27,11 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# shellcheck source=install/lib/common.sh
 . "$REPO_ROOT/install/lib/common.sh"
+# shellcheck source=install/lib/env.sh
 . "$REPO_ROOT/install/lib/env.sh"
+# shellcheck source=install/lib/docker.sh
 . "$REPO_ROOT/install/lib/docker.sh"
 
 AMBER_DIR="${AMBER_DIR:-/etc/amber-infra/amber}"

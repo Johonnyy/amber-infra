@@ -11,9 +11,11 @@
 [ -n "${_AMBER_INFRA_PREFLIGHT:-}" ] && return 0
 _AMBER_INFRA_PREFLIGHT=1
 
+# shellcheck source=install/lib/common.sh
 . "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 # preflight_ports needs container_state to tell our containerised edge apart from a
 # Caddy installed on the host — both are just "caddy" in ss output.
+# shellcheck source=install/lib/docker.sh
 . "$(dirname "${BASH_SOURCE[0]}")/docker.sh"
 
 preflight_system() {
@@ -141,8 +143,19 @@ preflight_image() {  # preflight_image IMAGE
      the workflow file as it is at the pushed ref, so a tag placed before the workflow
      was committed triggers nothing at all.
 
-     Check: https://github.com/<owner>?tab=packages
-     If it is there but private, make it public, or run 'docker login ghcr.io' here."
+     Check, in this order:
+       1. https://github.com/<owner>/<repo>/actions  — did the release run at all?
+          The workflow must exist ON the tagged commit; Actions runs the file as it
+          is at the pushed ref, so a tag older than the workflow triggers nothing.
+       2. https://github.com/<owner>?tab=packages     — is the package there?
+       3. If it is there, is it PUBLIC? Packages default to private, and this box
+          pulls unauthenticated. Either make it public, or 'docker login ghcr.io'.
+
+     For sync-store specifically there is a third option: its source is in this
+     checkout, so the image can be built here instead of pulled —
+         docker build -t $image /opt/amber-infra/sync-store
+     A locally built image satisfies this check. It also exists only on this box,
+     which is fine for one server and wrong for two."
 }
 
 public_ip() {

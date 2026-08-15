@@ -30,7 +30,9 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# shellcheck source=install/lib/common.sh
 . "$REPO_ROOT/install/lib/common.sh"
+# shellcheck source=install/lib/docker.sh
 . "$REPO_ROOT/install/lib/docker.sh"
 
 SECRETS_FILE="${SECRETS_FILE:-/etc/amber-infra/secrets.yaml}"
@@ -519,7 +521,7 @@ HOST_SERVICES="$(jq -n \
 
 # ==== the edge ===============================================================
 
-CADDY_STATE="$(docker inspect -f '{{.State.Status}}' caddy 2>/dev/null || echo missing)"
+CADDY_STATE="$(container_state caddy)"
 CADDY_SITES='[]'
 if [ -d "$CADDY_SNIPPETS" ]; then
   CADDY_SITES="$(find "$CADDY_SNIPPETS" -maxdepth 1 -name '*.caddy' -exec basename {} .caddy ';' 2>/dev/null \

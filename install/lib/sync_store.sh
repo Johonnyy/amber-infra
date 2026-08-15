@@ -16,8 +16,11 @@
 [ -n "${_AMBER_INFRA_SYNC_STORE:-}" ] && return 0
 _AMBER_INFRA_SYNC_STORE=1
 
+# shellcheck source=install/lib/common.sh
 . "$(dirname "${BASH_SOURCE[0]}")/common.sh"
+# shellcheck source=install/lib/docker.sh
 . "$(dirname "${BASH_SOURCE[0]}")/docker.sh"
+# shellcheck source=install/lib/secrets.sh
 . "$(dirname "${BASH_SOURCE[0]}")/secrets.sh"
 
 SYNC_STORE_DIR="${SYNC_STORE_DIR:-/etc/amber-infra/sync-store}"
@@ -141,8 +144,12 @@ sync_store_post_descriptor() {  # sync_store_post_descriptor FILE TOKEN
 
 sync_store_deregister() {  # sync_store_deregister NAME TOKEN
   local name="$1" token="$2"
-  run curl -fsS -X DELETE "$(sync_store_base_url)/servers/$name" \
-      -H "Authorization: Bearer $token" >/dev/null 2>&1 \
-    && ok "removed '$name' from the registry" \
-    || warn "could not remove '$name' from the registry (it may not have been there)"
+  # if/else, not `A && B || C`. With the latter a failing `ok` would also run the
+  # warn branch, reporting both outcomes for a single call.
+  if run curl -fsS -X DELETE "$(sync_store_base_url)/servers/$name" \
+      -H "Authorization: Bearer $token" >/dev/null 2>&1; then
+    ok "removed '$name' from the registry"
+  else
+    warn "could not remove '$name' from the registry (it may not have been there)"
+  fi
 }

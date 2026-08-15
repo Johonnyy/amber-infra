@@ -56,9 +56,29 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Validate the Caddyfile and every snippet
+      - name: Validate the Caddyfile with every snippet rendered
+        # Snippets carry {{DOMAIN}}/{{APP_NAME}}/{{UPSTREAM}} rather than literal
+        # hostnames now, because install.sh supplies those. Adapting them raw fails
+        # with "subject does not qualify for certificate", which is the adapter
+        # correctly refusing a template. So render them exactly as caddy_add_site
+        # does, and validate what a real box would actually get.
         run: |
-          docker run --rm -v "$PWD/caddy":/etc/caddy -e ACME_EMAIL=ci@example.com \
+          set -eu
+          mkdir -p /tmp/caddy/snippets
+          cp caddy/Caddyfile /tmp/caddy/Caddyfile
+          for s in caddy/snippets/*.caddy; do
+            n="$(basename "$s" .caddy)"; n="${n#_}"
+            sed -e "s|{{DOMAIN}}|$n.ci.example|g" \
+                -e "s|{{APP_NAME}}|$n|g" \
+                -e "s|{{UPSTREAM}}|127.0.0.1:9000|g" \
+                "$s" > "/tmp/caddy/snippets/$n.caddy"
+          done
+          if grep -rq '{{' /tmp/caddy/snippets; then
+            echo "::error::a snippet uses a placeholder caddy_add_site does not substitute"
+            grep -rn '{{' /tmp/caddy/snippets
+            exit 1
+          fi
+          docker run --rm -v /tmp/caddy:/etc/caddy -e ACME_EMAIL=ci@example.com \
             caddy:2.8-alpine caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
 
   compose:
@@ -66,9 +86,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Parse every compose file
+        # Each prod compose file names an env_file that secrets_render_env writes at
+        # install time from secrets.yaml — deliberately never committed, since it
+        # holds every secret the app has. `docker compose config` checks the file
+        # EXISTS, so validating a clean checkout needs empty stand-ins.
         run: |
+          set -eu
           for f in $(git ls-files '*docker-compose*.yml'); do
             echo "== $f"
+            d="$(dirname "$f")"
+            sed -n 's|^[[:space:]]*-[[:space:]]*\./\([^[:space:]#]*\.env\).*|\1|p' "$f" \
+              | while read -r e; do [ -f "$d/$e" ] || : > "$d/$e"; done
             ACME_EMAIL=ci@example.com docker compose -f "$f" config -q
           done
       - name: Production compose files must pin an explicit, non-latest tag

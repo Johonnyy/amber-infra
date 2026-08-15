@@ -11,7 +11,9 @@
 [ -n "${_AMBER_INFRA_CADDY:-}" ] && return 0
 _AMBER_INFRA_CADDY=1
 
+# shellcheck source=install/lib/common.sh
 . "$(dirname "${BASH_SOURCE[0]}")/common.sh"
+# shellcheck source=install/lib/docker.sh
 . "$(dirname "${BASH_SOURCE[0]}")/docker.sh"
 
 CADDY_ETC="${CADDY_ETC:-/etc/caddy}"
@@ -69,20 +71,33 @@ caddy_add_site() {  # caddy_add_site NAME DOMAIN UPSTREAM
 
   [ -f "$target" ] && { backup="$(mktemp)"; cp "$target" "$backup"; }
 
-  if [ -f "$source" ]; then
-    # A committed snippet wins over the template: amber.caddy and sync-store.caddy
-    # carry per-service decisions (log_skip, the streaming import) that a generic
-    # render would flatten.
-    run install -m 644 "$source" "$target"
+  # A committed snippet wins over the generic template — amber.caddy and
+  # sync-store.caddy carry per-service decisions (log_skip, the streaming import)
+  # that a generic render would flatten. But it is still a TEMPLATE: it is rendered
+  # with the same substitutions, never copied verbatim.
+  #
+  # Copying it verbatim is what this used to do, and the snippets carried literal
+  # hostnames. So `--domain` was honoured by the preflight and by *_PUBLIC_URL and
+  # then silently discarded here: the box served, and asked Let's Encrypt for, the
+  # domain that happened to be committed in this repo.
+  [ -f "$source" ] || source="$REPO_ROOT/caddy/snippets/_template.caddy"
+  [ -f "$source" ] || die "no snippet and no template at $source"
+
+  if dry; then
+    echo "   ${c_yellow}dry-run${c_off} would render $target from $(basename "$source") ($domain -> $upstream)"
   else
-    if dry; then
-      echo "   ${c_yellow}dry-run${c_off} would render $target from _template.caddy"
-    else
-      sed -e "s|{{DOMAIN}}|$domain|g" \
-          -e "s|{{APP_NAME}}|$name|g" \
-          -e "s|{{UPSTREAM}}|$upstream|g" \
-          "$REPO_ROOT/caddy/snippets/_template.caddy" > "$target"
-      chmod 644 "$target"
+    sed -e "s|{{DOMAIN}}|$domain|g" \
+        -e "s|{{APP_NAME}}|$name|g" \
+        -e "s|{{UPSTREAM}}|$upstream|g" \
+        "$source" > "$target"
+    chmod 644 "$target"
+    # A placeholder that survives means a snippet used a spelling this does not
+    # substitute — which would reach the adapter as a literal and fail there, several
+    # steps later and much less clearly.
+    if grep -q '{{' "$target"; then
+      rm -f "$target"
+      die "$(basename "$source") still contains an unsubstituted {{placeholder}} after rendering.
+     Only {{DOMAIN}}, {{APP_NAME}} and {{UPSTREAM}} are supported."
     fi
   fi
 

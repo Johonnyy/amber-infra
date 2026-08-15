@@ -16,12 +16,19 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# shellcheck source=install/lib/common.sh
 . "$REPO_ROOT/install/lib/common.sh"
+# shellcheck source=install/lib/env.sh
 . "$REPO_ROOT/install/lib/env.sh"
+# shellcheck source=install/lib/secrets.sh
 . "$REPO_ROOT/install/lib/secrets.sh"
+# shellcheck source=install/lib/docker.sh
 . "$REPO_ROOT/install/lib/docker.sh"
+# shellcheck source=install/lib/caddy.sh
 . "$REPO_ROOT/install/lib/caddy.sh"
+# shellcheck source=install/lib/sync_store.sh
 . "$REPO_ROOT/install/lib/sync_store.sh"
+# shellcheck source=install/lib/preflight.sh
 . "$REPO_ROOT/install/lib/preflight.sh"
 
 APP=""; DOMAIN=""; UPSTREAM=""; ROLE=""; IMAGE=""; DESCRIPTOR=""

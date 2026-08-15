@@ -14,10 +14,15 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# shellcheck source=install/lib/common.sh
 . "$REPO_ROOT/install/lib/common.sh"
+# shellcheck source=install/lib/secrets.sh
 . "$REPO_ROOT/install/lib/secrets.sh"
+# shellcheck source=install/lib/docker.sh
 . "$REPO_ROOT/install/lib/docker.sh"
+# shellcheck source=install/lib/caddy.sh
 . "$REPO_ROOT/install/lib/caddy.sh"
+# shellcheck source=install/lib/sync_store.sh
 . "$REPO_ROOT/install/lib/sync_store.sh"
 
 APP=""; ALL=0; PURGE=0; CONFIRMED=0

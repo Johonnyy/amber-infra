@@ -1,3 +1,11 @@
+# Placeholders, not values. install/lib/caddy.sh substitutes {{DOMAIN}},
+# {{APP_NAME}} and {{UPSTREAM}} from the arguments install.sh was given.
+#
+# These used to be literal hostnames, and caddy_add_site prefers a committed
+# snippet over the generic template — so the --domain you passed was used for the
+# preflight and the public URL and then silently ignored for the site itself. A
+# box would serve, and request a certificate for, whatever this file said.
+#
 # Amber — voice WebSocket at /ws, MCP streamable HTTP at /mcp, health at /health.
 #
 # ONE reverse_proxy covers all three. Caddy v2 proxies an `Upgrade: websocket`
@@ -10,10 +18,10 @@
 # The upstream is a loopback port, which is true whether Amber runs in a container
 # (she does now) or under systemd — see install/README.md.
 
-amber.johnny.dev {
-	import common amber
+{{DOMAIN}} {
+	import common {{APP_NAME}}
 
-	reverse_proxy 127.0.0.1:8000 {
+	reverse_proxy {{UPSTREAM}} {
 		import streaming
 	}
 }

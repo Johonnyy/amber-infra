@@ -1,12 +1,20 @@
+# Placeholders, not values. install/lib/caddy.sh substitutes {{DOMAIN}},
+# {{APP_NAME}} and {{UPSTREAM}} from the arguments install.sh was given.
+#
+# These used to be literal hostnames, and caddy_add_site prefers a committed
+# snippet over the generic template — so the --domain you passed was used for the
+# preflight and the public URL and then silently ignored for the site itself. A
+# box would serve, and request a certificate for, whatever this file said.
+#
 # sync-store — the discovery registry and Aperture's config sync.
 #
 # A plain JSON API: no streaming, so no (streaming) import. Registration POSTs are
 # small and the client's own timeout is 5s, so the default proxy behaviour is right.
 
-sync.johnny.dev {
-	import common sync-store
+{{DOMAIN}} {
+	import common {{APP_NAME}}
 
-	reverse_proxy 127.0.0.1:8081
+	reverse_proxy {{UPSTREAM}}
 
 	# /health is unauthenticated and polled by the container healthcheck and by
 	# install.sh. Logging every probe drowns the registrations that matter.

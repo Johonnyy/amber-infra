@@ -20,6 +20,7 @@
 [ -n "${_AMBER_INFRA_ENV:-}" ] && return 0
 _AMBER_INFRA_ENV=1
 
+# shellcheck source=install/lib/common.sh
 . "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
 env_has() { grep -qE "^$2=" "$1"; }                            # env_has FILE KEY
