@@ -204,11 +204,19 @@ if [ "$APP" = "amber" ]; then
   ok "amber-update.path armed; 'update your backend' will work by voice"
 fi
 
-caddy_add_site "$APP" "$DOMAIN" "$UPSTREAM"
-
+# The app comes up BEFORE its site is added, which is the order ensure_sync_store
+# already used and this did not.
+#
+# caddy_add_site ends by waiting up to 120s for https://<domain>/health. Adding the
+# site first meant waiting that out against an upstream that had not been started
+# yet — two minutes of certain failure, then a warning, on every single install. The
+# certificate is issued when the site block appears either way; nothing needed the
+# site to exist first.
 step "Starting $APP"
 compose_up "$APP_DIR"
 wait_healthy "$APP" 120 || warn "$APP is not healthy yet — docker logs $APP --tail 100"
+
+caddy_add_site "$APP" "$DOMAIN" "$UPSTREAM"
 
 # Verify, don't assume. install.sh never POSTs a descriptor on the app's behalf:
 # registration is agent_mcp's job on startup, and a registry entry written from bash
