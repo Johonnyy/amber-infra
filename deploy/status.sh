@@ -139,31 +139,6 @@ fi
 ACME_EMAIL="$(sget '.infra.acme_email')"
 case "$ACME_EMAIL" in ''|*example.com) ACME_SET=false ;; *) ACME_SET=true ;; esac
 
-# The domain is written down in three places and they must agree.
-#
-# `infra.primary_domain` is the apex, `sync_store.url` is what every app is told to
-# register against, and each `apps.*.domain` is what Caddy requests a certificate for.
-# Nothing derives one from another, so updating the apex and stopping there leaves two
-# stale hostnames — and both fail quietly rather than loudly: the certificate is for a
-# name you do not own, and discovery points at a host nobody is listening on.
-PRIMARY="$(sget '.infra.primary_domain')"
-if [ -n "$PRIMARY" ] && [ "$SECRETS_READABLE" = "true" ]; then
-  EXPECTED_SYNC="https://sync.$PRIMARY"
-  ACTUAL_SYNC="$(sget '.sync_store.url')"
-  if [ -n "$ACTUAL_SYNC" ] && [ "$ACTUAL_SYNC" != "$EXPECTED_SYNC" ]; then
-    note "sync_store.url is $ACTUAL_SYNC but install.sh serves the store at $EXPECTED_SYNC. Apps will register against a host that is not being served."
-  fi
-  while IFS= read -r _app; do
-    [ -n "$_app" ] || continue
-    _dom="$(sget ".apps.\"$_app\".domain")"
-    [ -n "$_dom" ] || continue
-    case "$_dom" in
-      *".$PRIMARY") ;;
-      *) note "apps.$_app.domain is $_dom, which is not under $PRIMARY. If the apex was changed without updating this, Caddy will request a certificate for a name you do not own." ;;
-    esac
-  done < <(yq -r '.apps // {} | keys | .[]' "$SECRETS_FILE" 2>/dev/null || true)
-fi
-
 # ==== the registry ===========================================================
 # Queried once with amber's key; every app's registration state is then read out of
 # this one response rather than re-fetched per app.
@@ -195,7 +170,11 @@ if [ -n "$SYNC_TOKEN" ]; then
         stale: (.stale // false)
       })' 2>/dev/null || echo '[]')"
   else
-    note "the sync-store did not answer at $SYNC_BASE/servers — peer registration state is unknown."
+    if [ "$(container_state sync-store)" = "missing" ]; then
+      note "the sync-store is not deployed on this box yet, so nothing has registered. install.sh brings it up on a core box."
+    else
+      note "the sync-store container exists but did not answer at $SYNC_BASE/servers — peer registration state is unknown."
+    fi
   fi
 elif [ "$SECRETS_READABLE" = "true" ]; then
   note "no sync-store token for 'amber' in secrets.yaml — the registry cannot be queried."
@@ -221,6 +200,37 @@ if [ -z "$SERVER_LABEL" ]; then
     *)    SERVER_LABEL=b ;;
   esac
 fi
+
+# The domain is written down in three places and they must agree.
+#
+# `infra.primary_domain` is the apex, `sync_store.url` is what every app is told to
+# register against, and each `apps.*.domain` is what Caddy requests a certificate for.
+# Nothing derives one from another, so updating the apex and stopping there leaves two
+# stale hostnames — and both fail quietly rather than loudly: the certificate is for a
+# name you do not own, and discovery points at a host nobody is listening on.
+PRIMARY="$(sget '.infra.primary_domain')"
+if [ -n "$PRIMARY" ] && [ "$SECRETS_READABLE" = "true" ]; then
+  EXPECTED_SYNC="https://sync.$PRIMARY"
+  ACTUAL_SYNC="$(sget '.sync_store.url')"
+  if [ -n "$ACTUAL_SYNC" ] && [ "$ACTUAL_SYNC" != "$EXPECTED_SYNC" ]; then
+    note "sync_store.url is $ACTUAL_SYNC but install.sh serves the store at $EXPECTED_SYNC. Apps will register against a host that is not being served."
+  fi
+  while IFS= read -r _app; do
+    [ -n "$_app" ] || continue
+    # Only apps that belong HERE. Another box's app gets its certificate on that box,
+    # from that box's secrets.yaml — warning about it here is noise about work that is
+    # not yours to do, on a screen whose whole job is to say what is.
+    _srv="$(sget ".apps.\"$_app\".server")"
+    if [ -n "$_srv" ] && [ "$_srv" != "$SERVER_LABEL" ]; then continue; fi
+    _dom="$(sget ".apps.\"$_app\".domain")"
+    [ -n "$_dom" ] || continue
+    case "$_dom" in
+      *".$PRIMARY") ;;
+      *) note "apps.$_app.domain is $_dom, which is not under $PRIMARY. If the apex was changed without updating this, Caddy will request a certificate for a name you do not own." ;;
+    esac
+  done < <(yq -r '.apps // {} | keys | .[]' "$SECRETS_FILE" 2>/dev/null || true)
+fi
+
 
 # ==== the catalogue ==========================================================
 # What this checkout can install: every directory carrying a docker-compose.prod.yml.

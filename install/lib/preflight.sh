@@ -102,6 +102,49 @@ preflight_upstream() {  # preflight_upstream APP HOST:PORT
      (systemctl start amber). Then re-run this install."
 }
 
+preflight_image() {  # preflight_image IMAGE
+  # Can this box actually get the image it is pinned to?
+  #
+  # `compose_up` finds out the hard way, four steps and several minutes in, after the
+  # firewall and the TLS edge have already been rewritten. And a dry run cannot find
+  # out at all: `run docker compose pull` prints an intention. So this asks the
+  # registry directly, which is the one part of a deploy that a rehearsal can check
+  # for real.
+  #
+  # A published image and a *readable* one are the same question here — GHCR packages
+  # are private by default, and an unauthenticated pull of a private package fails
+  # exactly like a pull of one that was never pushed. Both are "this box cannot get
+  # it", which is what the message says.
+  local image="$1"
+  [ -n "$image" ] || return 0
+
+  # Already on disk is enough: `pull` on an exact tag is a no-op when it is present,
+  # which is also what makes a rollback work offline.
+  if docker image inspect "$image" >/dev/null 2>&1; then
+    ok "image present locally: $image"
+    return 0
+  fi
+  if docker manifest inspect "$image" >/dev/null 2>&1; then
+    ok "image is pullable: $image"
+    return 0
+  fi
+
+  die "this box cannot pull $image.
+
+     Either the tag was never published, or the package is private and this box is
+     not logged in. GHCR packages default to PRIVATE, which fails identically to one
+     that does not exist.
+
+     Images are published by a version tag, not by pushing to main:
+         git tag v0.1.0 && git push origin v0.1.0
+     and the workflow has to already exist ON the commit being tagged — Actions runs
+     the workflow file as it is at the pushed ref, so a tag placed before the workflow
+     was committed triggers nothing at all.
+
+     Check: https://github.com/<owner>?tab=packages
+     If it is there but private, make it public, or run 'docker login ghcr.io' here."
+}
+
 preflight_dns() {  # preflight_dns DOMAIN
   local domain="$1" resolved public
   [ -n "$domain" ] || return 0

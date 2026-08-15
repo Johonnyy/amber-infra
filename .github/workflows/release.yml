@@ -1,0 +1,76 @@
+# Publishes the sync-store container image to GHCR on a version tag.
+#
+# This repo is mostly shell and config, with one exception: sync-store/ is a real
+# FastAPI service that lives here rather than in its own repo, because it is the
+# missing half of a contract agent-mcp-py already implements and splitting the two
+# would mean versioning a protocol across a repo boundary for no gain.
+#
+# Which means this repo has to publish an image, and until now nothing did —
+# `ensure_sync_store` pins ghcr.io/<owner>/sync-store:<version> and `docker compose
+# pull` cannot invent it. A core box would get through preflight, through the firewall,
+# through the Caddy edge, and then stop on a manifest that was never pushed.
+#
+# Copied from ci-templates/release.yml, with the :stable retag job deliberately
+# absent: the sync-store is a core service, exact-pinned on Server A, and never
+# updated by Watchtower. Keep the two files in step.
+#
+# Publishing only. It deliberately does NOT deploy: a green build is not a decision to
+# run something on Server A. Deploying means bumping the pin in the compose file and
+# running `docker compose up -d`, or deploy/rollback.sh.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/sync-store
+          # latest=false is NOT optional. metadata-action tags any semver push
+          # :latest by default, and the rule in this ecosystem is that no server
+          # ever runs a moving tag it did not opt into — ci.yml's compose check
+          # enforces the other end of that.
+          flavor: latest=false
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,format=long
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: ./sync-store
+          file: ./sync-store/Dockerfile
+          push: true
+          platforms: linux/amd64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Deployment note
+        run: |
+          {
+            echo "### Published, not deployed"
+            echo ""
+            echo "Set \`sync_store.image\` in /etc/amber-infra/secrets.yaml to one of"
+            echo "the tags above, then re-run \`install.sh --app <name>\` on the core"
+            echo "box — \`ensure_sync_store\` pulls the pin from there."
+          } >> "$GITHUB_STEP_SUMMARY"

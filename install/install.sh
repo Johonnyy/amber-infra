@@ -115,6 +115,10 @@ esac
 
 preflight_ports
 preflight_upstream "$APP" "$UPSTREAM"
+preflight_image "$IMAGE"
+if [ "$ROLE" = "core" ]; then
+  preflight_image "$(secrets_get '.sync_store.image')"
+fi
 preflight_dns "$DOMAIN"
 # The one hostname nobody remembers, because nobody types it: on a core box the
 # sync-store gets a site at sync.<primary_domain>, derived rather than passed. Without
