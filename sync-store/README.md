@@ -119,6 +119,11 @@ In production it runs from `docker-compose.prod.yml` on Server A, behind Caddy a
 `sync.<domain>`, with `/data` on a named volume. See the repo README for the
 deploy runbook.
 
+Updating a deployed one is `deploy/update-sync-store.sh --to <tag>` (or the Registry
+card in Aperture), **not** *Update infra* — that is a `git pull` and the store runs
+from a pinned image. The script writes both places the pin lives, and reverts if the
+new image does not come back healthy.
+
 ## Known ecosystem wart
 
 `mcp_path` is stored and served, but nothing reads it — `agent_mcp.registry`

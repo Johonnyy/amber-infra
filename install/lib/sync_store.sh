@@ -72,6 +72,22 @@ ensure_sync_store() {
   # restart ONLY when it actually changed. Restarting a healthy registry on every
   # install would be its own small outage, repeated.
   if sync_store_up; then
+    # A changed pin is *not* acted on here, only reported.
+    #
+    # This function runs on every app install, and rolling the registry every app
+    # depends on to a new image as a side effect of installing something else is a
+    # surprise nobody asked for — worse, one that happens halfway through another
+    # operation. But saying nothing is how the pin sat in secrets.yaml looking applied.
+    # So: name it, name the command that does it, and carry on.
+    local deployed=""
+    [ -f "$SYNC_STORE_DIR/docker-compose.prod.yml" ] \
+      && deployed="$(image_of "$SYNC_STORE_DIR/docker-compose.prod.yml" || true)"
+    if [ -n "$deployed" ] && [ "$deployed" != "$image" ]; then
+      warn "secrets.yaml pins the sync-store to $image but $deployed is deployed.
+     Not changing it here — an app install must not roll the registry underneath you:
+         bash $REPO_ROOT/deploy/update-sync-store.sh --to ${image##*:}"
+    fi
+
     local current=""
     [ -f "$SYNC_STORE_DIR/sync-store.env" ] \
       && current="$(env_get "$SYNC_STORE_DIR/sync-store.env" SYNC_STORE_KEYS || true)"

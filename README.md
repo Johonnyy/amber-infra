@@ -29,7 +29,7 @@ amber/         Amber's image, compose, and self-update units
 bloom/         Bloom's compose — the agent spawner, core service on Server A
 secrets/       secrets.example.yaml — the single source for every generated .env
 install/       install.sh, uninstall.sh, and the shell library they share
-deploy/        rollback.sh, update-amber.sh, migrate-amber-db.sh, status.sh, watchtower
+deploy/        rollback.sh, update-app.sh, update-sync-store.sh, status.sh, watchtower
 backup/        sqlite + postgres snapshots, retention, restore rehearsal
 ci-templates/  ci.yml and release.yml, to copy into each repo
 ```
@@ -211,6 +211,27 @@ it.
 The field worth reading is `imagePinned` vs `imageRunning`. They diverge when a pin
 was bumped and nothing restarted — the state where every health check is green and
 the code running is not the code you think it is.
+
+**Update the sync-store.** It is the one thing in this repo that ships as an image, so
+*Update infra* — a `git pull` — brings its source and changes nothing about what runs.
+`ensure_sync_store` also returns early on a healthy store, so re-running an install
+does not roll it either. This is the path:
+
+```bash
+sudo bash /opt/amber-infra/deploy/update-sync-store.sh --to 0.2.0 --dry-run
+sudo bash /opt/amber-infra/deploy/update-sync-store.sh --to 0.2.0
+```
+
+A thin wrapper over `update-app.sh`, so it pulls, restarts, waits for health and
+**reverts to the last image this box saw healthy** if it does not come back. What is
+genuinely its own: the pin lives in two places — `sync_store.image` in secrets.yaml,
+which a fresh install reads, and the deployed compose file, which is what actually
+runs. It writes both, and writes secrets.yaml only *after* the store comes back, so a
+version that was rejected is never recorded as the one this box wants. With no `--to`
+it re-pulls the current pin, which is the "it is wedged, put it back" case.
+
+Aperture drives it from the Registry card: the version row offers the newest
+amber-infra release, and Advanced mode takes any other tag.
 
 **Rotate a peer token.** Edit `sync_store.keys[]` in `secrets.yaml`, re-run
 `install.sh --app <name>`, restart the app. To change the credential *Amber presents

@@ -310,7 +310,22 @@ SYNC_STARTED_AT=""
 SYNC_RUNNING_OK=false
 SYNC_DECLARED_OK=false
 
+# What the registry is pinned to, and what it is actually running.
+#
+# Reported for the same reason every app reports the pair: the two can disagree, and
+# that disagreement is invisible from either file alone. It matters more here than for
+# an app, because `ensure_sync_store` writes the image into the deployed compose file
+# only when it first creates it — so a bumped `sync_store.image` sits there looking
+# applied, and the next fresh install is where you find out it never was.
+SYNC_IMAGE_PINNED="$(sget '.sync_store.image')"
+SYNC_IMAGE_DEPLOYED=""
+SYNC_IMAGE_RUNNING=""
+[ -f "$ETC/sync-store/docker-compose.prod.yml" ] \
+  && SYNC_IMAGE_DEPLOYED="$(grep -E '^\s*image:' "$ETC/sync-store/docker-compose.prod.yml" \
+       | head -n1 | sed -E 's/^\s*image:\s*//; s/\s*$//' || true)"
+
 if have docker && [ "$SYNC_STATE" != "missing" ]; then
+  SYNC_IMAGE_RUNNING="$(docker container inspect -f '{{.Config.Image}}' sync-store 2>/dev/null || true)"
   SYNC_STARTED_AT="$(docker container inspect -f '{{.State.StartedAt}}' sync-store 2>/dev/null || true)"
   case "$SYNC_STARTED_AT" in 0001-01-01*) SYNC_STARTED_AT="" ;; esac
   # `container inspect`, never bare `inspect` — see the note in app_json.
@@ -348,6 +363,15 @@ if [ "$SYNC_RUNNING_OK" = "true" ] && [ "$SYNC_DECLARED_OK" = "true" ]; then
     note "the sync-store is running an older key list than secrets.yaml declares ($(printf '%s' "$SYNC_KEYS_DRIFT" | jq -r 'join(", ")')). SYNC_STORE_KEYS is read at STARTUP, so those keys are rejected until it reloads: bash deploy/reload-registry.sh"
   fi
   unset SYNC_KEYS_DRIFT
+fi
+
+# The image equivalent of the key drift above, and it hides in exactly the same way:
+# secrets.yaml is what a fresh install reads, the deployed compose is what runs, and
+# `ensure_sync_store` stops touching the compose file after the first create — so
+# editing the pin by hand looks applied and is not.
+if [ "$SECRETS_READABLE" = "true" ] && [ -n "$SYNC_IMAGE_PINNED" ] && [ -n "$SYNC_IMAGE_DEPLOYED" ] \
+   && [ "$SYNC_IMAGE_PINNED" != "$SYNC_IMAGE_DEPLOYED" ]; then
+  note "secrets.yaml pins the sync-store to $SYNC_IMAGE_PINNED but the deployed compose runs $SYNC_IMAGE_DEPLOYED. A reinstall would roll it to the pin: bash deploy/update-sync-store.sh --to ${SYNC_IMAGE_PINNED##*:}"
 fi
 
 # ==== which box is this ======================================================
@@ -896,6 +920,9 @@ jq -n \
   --arg     syncState       "$SYNC_STATE" \
   --argjson syncDetail      "$(jnul "$SYNC_DETAIL")" \
   --argjson syncStartedAt   "$(jnul "$SYNC_STARTED_AT")" \
+  --argjson syncPinned      "$(jnul "${SYNC_IMAGE_DEPLOYED:-$SYNC_IMAGE_PINNED}")" \
+  --argjson syncDeclared    "$(jnul "$SYNC_IMAGE_PINNED")" \
+  --argjson syncRunning     "$(jnul "$SYNC_IMAGE_RUNNING")" \
   --argjson syncKeysOk      "$SYNC_KEYS_READABLE" \
   --argjson syncKeysRunning "$SYNC_KEYS_RUNNING" \
   --argjson syncKeysDeclared "$SYNC_KEYS_DECLARED" \
@@ -908,7 +935,7 @@ jq -n \
   --argjson warnings        "$WARNINGS" \
   '{
      installed: true,
-     schema: 10,
+     schema: 11,
      repoRoot: $repoRoot, commit: $commit, role: $role, primaryDomain: $primaryDomain,
      docker: $docker, compose: $compose,
      tools: $tools,
@@ -927,6 +954,8 @@ jq -n \
      syncStore: { url: $syncUrl, reachable: $syncReachable, servers: $syncServers,
                   containerState: $syncState, detail: $syncDetail,
                   startedAt: $syncStartedAt,
+                  imagePinned: $syncPinned, imageDeclared: $syncDeclared,
+                  imageRunning: $syncRunning,
                   keys: { readable: $syncKeysOk,
                           running: $syncKeysRunning, declared: $syncKeysDeclared } },
      dns: { publicIp: $publicIp, records: $dnsRecords },
