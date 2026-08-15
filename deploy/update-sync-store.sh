@@ -83,7 +83,12 @@ if [ -n "$PINNED" ] && [ "$PINNED" != "$CURRENT" ]; then
      They will agree again when this finishes."
 fi
 
-step "Updating the sync-store to $TARGET (running: $CURRENT)"
+# "deployed", not "running": those are two different facts, and this script exists in
+# a world where they diverge — a compose file rewritten by an update that then failed
+# leaves the pin ahead of the container. Saying "running" when we mean the file is how
+# a log becomes untrustworthy.
+RUNNING="$(docker container inspect -f '{{.Config.Image}}' sync-store 2>/dev/null || true)"
+step "Updating the sync-store to $TARGET (deployed pin: $CURRENT${RUNNING:+, running: $RUNNING})"
 
 UPDATE_ARGS=()
 [ "$TARGET" != "$CURRENT" ] && UPDATE_ARGS+=("--to" "$TARGET")

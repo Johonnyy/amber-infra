@@ -123,7 +123,11 @@ EXAMPLE="$(mktemp)"
 if env_example_from_image "$AFTER" "$EXAMPLE"; then
   env_reconcile "$ENV_FILE" "$EXAMPLE" "$ENV_PREFIX"
 else
-  warn "could not read .env.example from $AFTER — skipping env reconciliation"
+  # Not every image bakes one — the sync-store does not. Skipping costs new keys
+  # arriving with their defaults; it does not weaken the required-values check below,
+  # which is the one that must refuse to restart into a broken configuration.
+  warn "no /srv/.env.example in $AFTER — skipping env reconciliation.
+     New keys will not arrive with defaults; existing values are untouched."
 fi
 rm -f "$EXAMPLE"
 

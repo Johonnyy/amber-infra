@@ -20,6 +20,13 @@ COPY pyproject.toml README.md ./
 COPY app ./app
 RUN pip install .
 
+# The ecosystem's update contract, same as Amber's image: deploy/update-app.sh reads
+# this out of the image being deployed and adds any key the running .env does not have
+# yet, carrying its default. Without it an update still works — the reconciliation is
+# skipped with a warning — but a new setting would have to be noticed and typed by
+# hand on every box, which is exactly the kind of thing nobody notices.
+COPY .env.example /srv/.env.example
+
 # `syncstore`, not `sync`. Debian ships a `sync` system account — uid 4, shell
 # /bin/sync — in every base image, so `useradd sync` fails with exit 9 (name in use)
 # and takes the whole build with it. The uid is unchanged; only the name had to move.

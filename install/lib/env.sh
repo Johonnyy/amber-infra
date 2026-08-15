@@ -82,16 +82,30 @@ env_reconcile() {  # env_reconcile FILE EXAMPLE [PREFIX]
   fi
 }
 
-env_example_from_image() {  # env_example_from_image IMAGE DEST
+env_example_from_image() {  # env_example_from_image IMAGE DEST -> 0 when it got one
   # Pull /srv/.env.example out of an image so env_reconcile has something to diff
   # against. Amber's Dockerfile bakes it in for exactly this.
+  #
+  # **Returns non-zero rather than dying**, and that distinction is the whole point of
+  # the function. Its one caller (deploy/update-app.sh) is written to warn and skip
+  # reconciliation when there is no example — which was dead code while this `die`d,
+  # so an image without one could not be updated *at all*. The sync-store was the
+  # first: four pure-Python deps, no baked example, and every update stopped here with
+  # a `cat` error and no explanation of why that was fatal.
+  #
+  # It should not be fatal. Reconciliation is a convenience — new keys arrive carrying
+  # their defaults — not a correctness gate. The check that must fail loudly is
+  # `env_require` immediately after, which refuses to restart into a configuration
+  # missing a value a human has to supply, and it is untouched by this.
   local image="$1" dest="$2"
   if dry; then
     echo "   ${c_yellow}dry-run${c_off} would extract .env.example from $image"
     return 0
   fi
-  docker run --rm --entrypoint cat "$image" /srv/.env.example > "$dest" \
-    || die "could not read /srv/.env.example from $image"
+  if ! docker run --rm --entrypoint cat "$image" /srv/.env.example > "$dest" 2>/dev/null; then
+    : > "$dest"   # a failed redirect can leave a partial file; never diff against one
+    return 1
+  fi
 }
 
 env_require() {  # env_require FILE KEY... — die on any key still unset or CHANGEME
