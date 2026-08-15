@@ -20,10 +20,14 @@
 #   backup-sqlite.sh --verify-latest restore-rehearse the newest snapshot per target
 #   backup-sqlite.sh --list          what is on disk
 #
+# shellcheck source-path=SCRIPTDIR
+# ^ must appear before any COMMAND to be file-wide. Placed after one (the
+#   double-source guard) it binds to the next statement only, and every source
+#   after the first goes back to SC1091.
+
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-# shellcheck source-path=SCRIPTDIR
 # shellcheck source=../install/lib/common.sh
 . "$REPO_ROOT/install/lib/common.sh"
 # shellcheck source=../install/lib/secrets.sh

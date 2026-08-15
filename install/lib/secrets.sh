@@ -10,10 +10,14 @@
 # the yq path, rather than an empty string that propagates into a rendered .env and
 # surfaces three steps later as an unauthorized peer call.
 
+# shellcheck source-path=SCRIPTDIR
+# ^ must appear before any COMMAND to be file-wide. Placed after one (the
+#   double-source guard) it binds to the next statement only, and every source
+#   after the first goes back to SC1091.
+
 [ -n "${_AMBER_INFRA_SECRETS:-}" ] && return 0
 _AMBER_INFRA_SECRETS=1
 
-# shellcheck source-path=SCRIPTDIR
 # shellcheck source=common.sh
 . "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 # shellcheck source=env.sh

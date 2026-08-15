@@ -8,10 +8,14 @@
 # fail, it can lock you out of retrying for an hour. Checking first turns that into
 # a five-second refusal.
 
+# shellcheck source-path=SCRIPTDIR
+# ^ must appear before any COMMAND to be file-wide. Placed after one (the
+#   double-source guard) it binds to the next statement only, and every source
+#   after the first goes back to SC1091.
+
 [ -n "${_AMBER_INFRA_PREFLIGHT:-}" ] && return 0
 _AMBER_INFRA_PREFLIGHT=1
 
-# shellcheck source-path=SCRIPTDIR
 # shellcheck source=common.sh
 . "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 # preflight_ports needs container_state to tell our containerised edge apart from a

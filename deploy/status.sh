@@ -27,10 +27,14 @@
 # dropped structurally — only key NAMES are emitted, so the GUI can say that
 # AMBER_OPENAI_API_KEY is set without ever having seen it.
 #
+# shellcheck source-path=SCRIPTDIR
+# ^ must appear before any COMMAND to be file-wide. Placed after one (the
+#   double-source guard) it binds to the next statement only, and every source
+#   after the first goes back to SC1091.
+
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-# shellcheck source-path=SCRIPTDIR
 # shellcheck source=../install/lib/common.sh
 . "$REPO_ROOT/install/lib/common.sh"
 # shellcheck source=../install/lib/docker.sh

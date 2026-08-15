@@ -13,10 +13,14 @@
 # descriptor.json because it has no agent-mcp-py to do this for it. That is the
 # exception, not the path.
 
+# shellcheck source-path=SCRIPTDIR
+# ^ must appear before any COMMAND to be file-wide. Placed after one (the
+#   double-source guard) it binds to the next statement only, and every source
+#   after the first goes back to SC1091.
+
 [ -n "${_AMBER_INFRA_SYNC_STORE:-}" ] && return 0
 _AMBER_INFRA_SYNC_STORE=1
 
-# shellcheck source-path=SCRIPTDIR
 # shellcheck source=common.sh
 . "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 # shellcheck source=docker.sh

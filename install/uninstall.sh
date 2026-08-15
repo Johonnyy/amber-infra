@@ -11,10 +11,14 @@
 # would delete caddy-data — the ACME certificates and account key. Losing those does
 # not just cost a re-issue, it spends Let's Encrypt rate limit you may need.
 #
+# shellcheck source-path=SCRIPTDIR
+# ^ must appear before any COMMAND to be file-wide. Placed after one (the
+#   double-source guard) it binds to the next statement only, and every source
+#   after the first goes back to SC1091.
+
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-# shellcheck source-path=SCRIPTDIR
 # shellcheck source=lib/common.sh
 . "$REPO_ROOT/install/lib/common.sh"
 # shellcheck source=lib/secrets.sh

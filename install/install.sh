@@ -13,10 +13,14 @@
 # prompts for a secret that belongs in that file — a value invented at a prompt is a
 # value that is not in the backup.
 #
+# shellcheck source-path=SCRIPTDIR
+# ^ must appear before any COMMAND to be file-wide. Placed after one (the
+#   double-source guard) it binds to the next statement only, and every source
+#   after the first goes back to SC1091.
+
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-# shellcheck source-path=SCRIPTDIR
 # shellcheck source=lib/common.sh
 . "$REPO_ROOT/install/lib/common.sh"
 # shellcheck source=lib/env.sh

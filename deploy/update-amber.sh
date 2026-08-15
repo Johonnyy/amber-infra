@@ -24,10 +24,14 @@
 # The revert is the point. A voice-triggered update that leaves Amber unable to
 # hear the next instruction is the one failure mode that cannot fix itself.
 #
+# shellcheck source-path=SCRIPTDIR
+# ^ must appear before any COMMAND to be file-wide. Placed after one (the
+#   double-source guard) it binds to the next statement only, and every source
+#   after the first goes back to SC1091.
+
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-# shellcheck source-path=SCRIPTDIR
 # shellcheck source=../install/lib/common.sh
 . "$REPO_ROOT/install/lib/common.sh"
 # shellcheck source=../install/lib/env.sh

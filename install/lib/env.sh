@@ -17,10 +17,14 @@
 # that are missing and never overwrites an existing value, so a value written once
 # by install.sh survives every subsequent update.
 
+# shellcheck source-path=SCRIPTDIR
+# ^ must appear before any COMMAND to be file-wide. Placed after one (the
+#   double-source guard) it binds to the next statement only, and every source
+#   after the first goes back to SC1091.
+
 [ -n "${_AMBER_INFRA_ENV:-}" ] && return 0
 _AMBER_INFRA_ENV=1
 
-# shellcheck source-path=SCRIPTDIR
 # shellcheck source=common.sh
 . "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
