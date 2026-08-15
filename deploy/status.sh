@@ -401,8 +401,17 @@ app_json() {  # app_json NAME
   if [ -n "$compose" ]; then pinned="$(image_of "$compose")"; fi
   if [ -z "$pinned" ]; then pinned="$(sget ".apps.\"$name\".image")"; fi
 
-  state="$(docker inspect -f '{{.State.Status}}' "$name" 2>/dev/null || echo missing)"
-  running="$(docker inspect -f '{{.Config.Image}}' "$name" 2>/dev/null || true)"
+  # `docker container inspect`, never bare `docker inspect` — see container_health.
+  # Bare inspect resolves images, volumes and networks from the same namespace, and on
+  # one of those `.State.Status` evaluates to the string "<no value>" with exit 0, so
+  # the `|| echo missing` fallback never fires and every consumer reads a container
+  # that does not exist as one that does.
+  state="$(docker container inspect -f '{{.State.Status}}' "$name" 2>/dev/null || echo missing)"
+  # Trimmed, because a client comparing against a known state should not be defeated
+  # by whitespace it cannot see.
+  state="$(printf '%s' "$state" | tr -d '[:space:]')"
+  [ -n "$state" ] || state=missing
+  running="$(docker container inspect -f '{{.Config.Image}}' "$name" 2>/dev/null || true)"
   health="$(container_health "$name")"
 
   domain="$(sget ".apps.\"$name\".domain")"
@@ -593,7 +602,7 @@ jq -n \
   --argjson warnings        "$WARNINGS" \
   '{
      installed: true,
-     schema: 6,
+     schema: 7,
      repoRoot: $repoRoot, commit: $commit, role: $role, primaryDomain: $primaryDomain,
      docker: $docker, compose: $compose,
      tools: $tools,
