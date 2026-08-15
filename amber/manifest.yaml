@@ -1,0 +1,107 @@
+# What Amber needs, in Amber's own words.
+#
+# This file is the authority for three things that used to be guessed: the env prefix,
+# which keys exist, and who is supposed to fill each one. See install/lib/manifest.sh
+# for why, and .github/workflows/ci.yml for the checks that keep it honest — in
+# particular that the three derived key names below really are `${env_prefix}_*`,
+# which is what makes a wrong prefix impossible rather than merely unlikely.
+#
+# It lives beside docker-compose.prod.yml, not inside the image, because the readiness
+# checklist and `declare` both need it BEFORE an image has been pulled.
+manifest: 1
+app: amber
+
+# Amber embeds agent-mcp-py AND agent-runtime, and builds both libraries' settings
+# from one prefix with `_env_file=None`, precisely so two config surfaces can never
+# disagree about which database to write. So she owns AMBER_MCP_ rather than reading
+# the AGENT_MCP_ default. See amber_v2/app/config.py.
+env_prefix: AMBER_MCP
+
+# Core services are exact-pinned and ignore Watchtower, so an update is something you
+# ask for. `app` role services run :stable and update themselves.
+role: core
+
+release:
+  # The repo whose `v*` tags are the versions, and the GHCR package the image is
+  # published under. They are NOT the same word — which is the whole reason this is
+  # declared rather than derived from the image name.
+  repo: Johonnyy/amber-v2
+  package: amber
+
+keys:
+  # --- install.sh computes these -----------------------------------------------
+  # Deliberately absent from secrets.example.yaml: install.sh writes them after
+  # secrets_render_env, so anything set there is overwritten on every install, and a
+  # CHANGEME in a value nobody can meaningfully fill reads as an outstanding task in
+  # every checklist that scans the file.
+  - { name: AMBER_MCP_PUBLIC_URL,       kind: derived, source: public_url }
+  - { name: AMBER_MCP_SYNC_STORE_URL,   kind: derived, source: sync_store_url }
+  - { name: AMBER_MCP_SYNC_STORE_TOKEN, kind: derived, source: sync_store_token, secret: true }
+  - name: AMBER_UPDATE_COMMAND
+    kind: derived
+    source: update_command
+    why: >
+      The voice self-update needs a host-side watcher, because there is no systemctl
+      and no Docker socket inside her container. See amber/amber-update.path.
+
+  # --- the box generates these --------------------------------------------------
+  - name: AMBER_AUTH_SECRET
+    kind: generated:openssl-hex-32
+    label: WebSocket handshake secret
+    why: Required on the WS handshake once she is publicly reachable.
+  - name: AMBER_MCP_KEYS
+    kind: generated:token
+    peers: [Aperture]
+    label: Bearer tokens other agents present to Amber's MCP server
+    why: >
+      Without at least one, agent-mcp-py fails closed and the server is simply not
+      mounted. A generated token is only the ACCEPTING half — whatever presents it
+      still needs the same value.
+
+  # --- only you have these ------------------------------------------------------
+  # `credential` is the id Aperture's vault matches on. The same id appears in
+  # bloom/manifest.yaml under a different prefixed name, which is the point: one saved
+  # key fills every app that needs it, and you never type it twice.
+  - name: AMBER_OPENAI_API_KEY
+    kind: supplied
+    credential: openai-api-key
+    label: OpenAI API key
+    help_url: https://platform.openai.com/api-keys
+    why: Whisper STT and TTS.
+  - name: AMBER_OPENROUTER_API_KEY
+    kind: supplied
+    credential: openrouter-api-key
+    label: OpenRouter API key
+    help_url: https://openrouter.ai/keys
+    why: The brain, via agent-runtime. Required unless AMBER_FEATURE_LLM=false.
+
+  # --- settings with defaults ---------------------------------------------------
+  - { name: AMBER_TIMEZONE, kind: config, default: America/New_York }
+  - name: AMBER_MEMORY_DB_PATH
+    kind: config
+    default: /data/amber.db
+    why: >
+      Inside the container, on the named volume — see deploy/migrate-amber-db.sh.
+      Not a host path.
+
+  # --- cross-app wiring ---------------------------------------------------------
+  # Both are `required: false` because they only mean anything once Bloom exists, and
+  # refusing to install Amber on a box without Bloom would be absurd.
+  - name: AMBER_MCP_PEERS
+    kind: peer_map
+    required: false
+    label: Peers Amber may call
+    why: >
+      Amber's broker is built from load_static_peers(AMBER_MCP_PEERS) alone; she never
+      consults the sync-store's discovered layer. So a peer missing here is uncallable
+      with no error anywhere — Bloom can register perfectly, appear in GET /servers,
+      and still be offered to her as nothing at all.
+  - name: AMBER_MCP_PEER_TOKEN
+    kind: peer_token
+    peer_of: bloom
+    peer_key: BLOOM_MCP_KEYS
+    required: false
+    label: The bearer Amber presents to Bloom
+    why: >
+      Must equal the token half of Bloom's BLOOM_MCP_KEYS ("amber:<token>") — two
+      values that have to match exactly. A mismatch is a 401 on every delegated task.

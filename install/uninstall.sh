@@ -4,7 +4,9 @@
 #
 #   uninstall.sh --app finance              stop it, unhook it, keep its data
 #   uninstall.sh --app finance --purge      ...and delete its volumes
+#   uninstall.sh --app finance --undeclare  ...and remove it from secrets.yaml too
 #   uninstall.sh --all --purge --yes-i-mean-it
+#   --dry-run works on every path above and changes nothing
 #
 # Data is kept by default and backups are NEVER touched, at any invocation. The
 # --all path additionally refuses to run without --purge --yes-i-mean-it, because it
@@ -30,13 +32,14 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # shellcheck source=lib/sync_store.sh
 . "$REPO_ROOT/install/lib/sync_store.sh"
 
-APP=""; ALL=0; PURGE=0; CONFIRMED=0
+APP=""; ALL=0; PURGE=0; CONFIRMED=0; UNDECLARE=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --app)            APP="$2"; shift 2 ;;
     --all)            ALL=1; shift ;;
     --purge)          PURGE=1; shift ;;
+    --undeclare)      UNDECLARE=1; shift ;;
     --yes-i-mean-it)  CONFIRMED=1; shift ;;
     --secrets)        SECRETS_FILE="$2"; shift 2 ;;
     --dry-run)        DRY_RUN=1; shift ;;
@@ -86,6 +89,15 @@ remove_app() {
 
 if [ -n "$APP" ]; then
   remove_app "$APP"
+  # Strictly after remove_app, never before: it reads .backup.target and the
+  # sync-store admin token out of secrets.yaml, so the stanza has to outlive the
+  # teardown that uses it.
+  if [ "$UNDECLARE" = "1" ]; then
+    # DRY_RUN travels in the environment rather than as a flag, because common.sh
+    # already reads it there and one channel cannot disagree with itself.
+    DRY_RUN="$DRY_RUN" bash "$REPO_ROOT/install/declare.sh" \
+      --app "$APP" --undeclare --force --secrets "$SECRETS_FILE"
+  fi
   exit 0
 fi
 
@@ -125,4 +137,5 @@ if [ "$ALL" = "1" ]; then
   exit 0
 fi
 
-die "usage: $0 --app NAME [--purge] | --all --purge --yes-i-mean-it"
+die "usage: $0 --app NAME [--purge] [--undeclare] [--dry-run]
+       $0 --all --purge --yes-i-mean-it [--dry-run]"

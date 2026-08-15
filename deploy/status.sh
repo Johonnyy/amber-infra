@@ -131,10 +131,18 @@ if [ "$SECRETS_READABLE" = "true" ] && have jq; then
   # which Bloom validates at startup and which a hex string is not. A setup screen
   # offering one button for this whole group will hand someone a value the service
   # refuses to boot with, so branch on the placeholder, not on the category.
+  # The `_KEYS$` arm is a *name* rule, so on its own it captures any placeholder that
+  # happens to sit in a key ending `_KEYS` — including BLOOM_FERNET_KEYS, whose value
+  # is `CHANGEME-fernet-generate-key`. That is the exact mistake the paragraph above
+  # warns about, and it was live: the setup screen offered it, and the generator wrote
+  # 32 hex bytes into a slot Bloom rejects at startup. So the name rule is narrowed to
+  # a *bare* CHANGEME, which is the only shape the compound `name:tok` case ever has.
+  # A `CHANGEME-<recipe>` value is claimed by the recipe that names it, or by nothing.
   GEN_PATHS="$(printf '%s' "$SECRETS_JSON" | jq -c '
       [paths(type == "string" and test("CHANGEME")) as $p
        | select((getpath($p) | test("CHANGEME-openssl-rand-hex"))
-                or ($p[-1] | tostring | test("_KEYS$")))
+                or (($p[-1] | tostring | test("_KEYS$"))
+                    and (getpath($p) | test("CHANGEME([^-]|$)"))))
        | $p | join(".")]' 2>/dev/null || echo '[]')"
   # install.sh recomputes these on every run, so a placeholder in one is not a task —
   # listing it would send someone hunting for a value that is about to be overwritten.
@@ -349,6 +357,46 @@ is_infra_service() {  # is_infra_service NAME
   case " $INFRA_SERVICES " in *" $1 "*) return 0 ;; *) return 1 ;; esac
 }
 
+# The app's own account of what it needs, passed through rather than interpreted.
+#
+# Read with yq and reshaped with jq rather than through install/lib/manifest.sh, for
+# two reasons. That library's accessors are line-oriented, so every field would be a
+# round trip back through shell on its way to becoming JSON again; and its
+# `manifest_check` can `die`, which this script must never do for a finding.
+#
+# The only semantics applied here are the two that have to hold everywhere: `required`
+# defaults to true, and `secret` may only be raised.
+#
+# `null` when the app has no manifest. A consumer must be able to tell "this app has
+# not been described" from "it was described as needing nothing".
+manifest_json() {  # manifest_json NAME
+  local path="$REPO_ROOT/$1/manifest.yaml"
+  [ -r "$path" ] || { echo null; return 0; }
+  yq -o=json '.' "$path" 2>/dev/null | jq -c '{
+    version:   (.manifest // 0),
+    envPrefix: ((.env_prefix // "") | sub("_$"; "")),
+    role:      (.role // null),
+    release:   (if .release then {repo: (.release.repo // null), package: (.release.package // null)} else null end),
+    keys: [ (.keys // [])[] | {
+      name:       .name,
+      # An unknown kind degrades rather than throws: a box reading a newer manifest
+      # must still render, and "somebody has to supply this" is the safe reading.
+      kind:       (.kind // "supplied"),
+      credential: (.credential // null),
+      label:      (.label // .name),
+      helpUrl:    (.help_url // null),
+      why:        (.why // null),
+      group:      (.group // null),
+      source:     (.source // null),
+      # has(), not `//`: an explicit false is not an absent field, and `//` cannot
+      # tell them apart.
+      default:    (if has("default")  then .default  else null end),
+      required:   (if has("required") then .required else true end),
+      secret:     ((.secret // false) or (.name | test("(_KEY|_KEYS|_TOKEN|_SECRET|_PASSWORD|_PASS)$")))
+    } ]
+  }' 2>/dev/null || echo null
+}
+
 catalogue_json() {
   local dir name compose image upstream
   for dir in "$REPO_ROOT"/*/; do
@@ -362,7 +410,8 @@ catalogue_json() {
     jq -n --arg name "$name" \
           --argjson image "$(jnul "$image")" \
           --argjson upstream "$(jnul "$upstream")" \
-          '{name: $name, image: $image, upstream: $upstream}'
+          --argjson manifest "$(manifest_json "$name")" \
+          '{name: $name, image: $image, upstream: $upstream, manifest: $manifest}'
   done | jq -sc '.'
 }
 
@@ -405,24 +454,36 @@ app_names() {
 # _TOKEN, _SECRET, _PASSWORD or _PASS is never printed, whatever it holds. `set` and
 # `placeholder` still describe it, which is everything an editor needs — you do not
 # have to see an API key to replace it, and this script stays safe to poll and log.
-app_env_json() {  # app_env_json NAME
+app_env_json() {  # app_env_json NAME MANIFEST_JSON
   if [ "$SECRETS_READABLE" != "true" ]; then echo '[]'; return 0; fi
-  yq -o=json ".apps.\"$1\".env // {}" "$SECRETS_FILE" 2>/dev/null | jq -c '
+  yq -o=json ".apps.\"$1\".env // {}" "$SECRETS_FILE" 2>/dev/null \
+    | jq -c --argjson mf "${2:-null}" '
     def issecret: test("(_KEY|_KEYS|_TOKEN|_SECRET|_PASSWORD|_PASS)$");
-    # install.sh writes these into the rendered .env AFTER secrets_render_env, so
-    # whatever secrets.yaml holds for them is overwritten on every install. Flagging
-    # them stops a setup screen listing a derived value as something a human has to
-    # go and find — see install/install.sh, "Wiring $APP into the sync-store".
+    # The name-based rule for "install.sh overwrites this on every run". It stays as
+    # the fallback for an app with no manifest, and ONLY as that: a manifest says so
+    # outright, and this rule cannot see a fourth derived key like BLOOM_PUBLIC_URL,
+    # which is exactly the kind of thing it used to make someone hunt for a value for.
     def isderived:
       test("(_PUBLIC_URL|_SYNC_STORE_URL|_SYNC_STORE_TOKEN)$") or . == "AMBER_UPDATE_COMMAND";
-    to_entries | map({
-      name: .key,
-      secret: (.key | issecret),
-      derived: (.key | isderived),
-      placeholder: (.value | tostring | test("CHANGEME")),
-      set: ((.value | tostring | length) > 0),
-      value: (if (.key | issecret) then null else (.value | tostring) end)
-    })' 2>/dev/null || echo '[]'
+    ($mf.keys // []) as $mk |
+    to_entries | map(
+      . as $e |
+      ($mk | map(select(.name == $e.key)) | first) as $m |
+      # The floor: the manifest may raise secrecy, never lower it. A careless manifest
+      # cannot talk this script into printing a token.
+      (($e.key | issecret) or ($m.secret // false)) as $sec |
+      {
+        name: $e.key,
+        secret: $sec,
+        derived: (if $m then ($m.kind == "derived") else ($e.key | isderived) end),
+        kind: ($m.kind // null),
+        credential: ($m.credential // null),
+        label: ($m.label // null),
+        required: (if $m then $m.required else true end),
+        placeholder: ($e.value | tostring | test("CHANGEME")),
+        set: (($e.value | tostring | length) > 0),
+        value: (if $sec then null else ($e.value | tostring) end)
+      })' 2>/dev/null || echo '[]'
 }
 
 app_json() {  # app_json NAME
@@ -479,6 +540,28 @@ app_json() {  # app_json NAME
     env_keys="$(grep -oE '^[A-Za-z_][A-Za-z0-9_]*=' "$env_file" 2>/dev/null | sed 's/=$//' | jq -Rn '[inputs]' || echo '[]')"
   fi
 
+  # The prefix, from all three places it can be known, because the whole class of bug
+  # here is those three disagreeing without anyone being told.
+  #
+  #   manifest  — what the app says it reads. Authoritative.
+  #   declared  — apps.<n>.env_prefix in secrets.yaml. Cross-check only.
+  #   rendered  — what install.sh actually wrote into the live .env. The ground truth
+  #               for a container that is already running.
+  #
+  # Aperture used to discover the rendered one by SSHing in and grepping this file
+  # itself. It is read here, where the file is already open and only key NAMES ever
+  # leave: keyed off _SYNC_STORE_URL rather than _PUBLIC_URL because an app may have a
+  # second, non-MCP *_PUBLIC_URL — Bloom's OAuth origin — and that one would match too.
+  local manifest env_prefix_declared env_prefix_rendered
+  manifest="$(manifest_json "$name")"
+  env_prefix_declared="$(sget ".apps.\"$name\".env_prefix")"
+  env_prefix_declared="${env_prefix_declared%_}"
+  env_prefix_rendered=""
+  if [ -r "$env_file" ]; then
+    env_prefix_rendered="$(grep -oE '^[A-Z][A-Z0-9_]*_SYNC_STORE_URL=' "$env_file" 2>/dev/null \
+      | head -n1 | sed 's/_SYNC_STORE_URL=$//' || true)"
+  fi
+
   jq -n \
     --arg     name     "$name" \
     --argjson domain   "$(jnul "$domain")" \
@@ -491,11 +574,14 @@ app_json() {  # app_json NAME
     --argjson compose  "$(jnul "$compose")" \
     --argjson http     "${http:-null}" \
     --argjson envKeys  "$env_keys" \
-    --argjson env      "$(app_env_json "$name")" \
+    --argjson env      "$(app_env_json "$name" "$manifest")" \
     --argjson server   "$(jnul "$server")" \
     --argjson thisBox  "$this_box" \
     --argjson declared "$declared" \
     --argjson available "$available" \
+    --argjson manifest "$manifest" \
+    --argjson prefixDeclared "$(jnul "$env_prefix_declared")" \
+    --argjson prefixRendered "$(jnul "$env_prefix_rendered")" \
     --argjson registry "$SYNC_SERVERS" \
     '($registry | map(select(.name == $name)) | .[0]) as $r | {
        name: $name, domain: $domain, upstream: $upstream,
@@ -504,7 +590,11 @@ app_json() {  # app_json NAME
        envFile: $envFile, composeFile: $compose,
        registered: ($r != null), lastSeen: ($r.lastSeen // null), stale: ($r.stale // false),
        httpStatus: $http, envKeys: $envKeys, env: $env,
-       server: $server, thisBox: $thisBox, declared: $declared, available: $available
+       server: $server, thisBox: $thisBox, declared: $declared, available: $available,
+       manifest: $manifest,
+       envPrefix: (if ($manifest.envPrefix // "") == "" then null else $manifest.envPrefix end),
+       envPrefixDeclared: $prefixDeclared,
+       envPrefixRendered: $prefixRendered
      }'
 }
 
@@ -635,7 +725,7 @@ jq -n \
   --argjson warnings        "$WARNINGS" \
   '{
      installed: true,
-     schema: 8,
+     schema: 9,
      repoRoot: $repoRoot, commit: $commit, role: $role, primaryDomain: $primaryDomain,
      docker: $docker, compose: $compose,
      tools: $tools,

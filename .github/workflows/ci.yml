@@ -52,6 +52,52 @@ jobs:
       # shared helper is reported as an unknown command and the output is noise.
       - run: shellcheck -x $(git ls-files '*.sh')
 
+  manifest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The same binary install.sh puts on a box, so a manifest that lints here
+      # cannot fail to parse there.
+      - name: Install yq (v4)
+        run: |
+          sudo curl -fsSL https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 \
+            -o /usr/local/bin/yq
+          sudo chmod +x /usr/local/bin/yq
+      - name: Every app declares what it needs, and says so consistently
+        # The checks are in install/lib/manifest.sh rather than inline here, so that
+        # everything which knows the manifest format is one file you can read top to
+        # bottom — and so the same command runs locally.
+        #
+        # The one that earns its keep is the assertion that each app's three derived
+        # keys are literally ${env_prefix}_PUBLIC_URL / _SYNC_STORE_URL /
+        # _SYNC_STORE_TOKEN. A wrong prefix is invisible at runtime: both apps'
+        # Settings classes use extra="ignore", so keys in the wrong namespace are not
+        # an error, they are simply never read, and the app starts, serves, never
+        # mounts its MCP server and never registers. Comparing the prefix against the
+        # key names on every push is what makes that unrepresentable rather than
+        # merely unlikely.
+        run: bash -c '. install/lib/manifest.sh && manifest_lint_all'
+      - name: declare.sh rehearses cleanly for every app in the example
+        # Cheap, and it exercises the whole declare path — manifest parse, prefix
+        # resolution, placeholder seeding — against the committed example rather than
+        # against a fixture that can quietly stop resembling it.
+        #
+        # --dry-run writes nothing, but it runs on a copy anyway: a rehearsal that
+        # needs the real file to be safe is one bad flag away from not being.
+        run: |
+          set -eu
+          cp secrets/secrets.example.yaml /tmp/secrets.yaml
+          for d in */manifest.yaml; do
+            app="$(dirname "$d")"
+            echo "== $app"
+            bash install/declare.sh --app "$app" --reconcile --dry-run --secrets /tmp/secrets.yaml
+          done
+          bash install/fill-secrets.sh --dry-run --secrets /tmp/secrets.yaml
+          if ! diff -q secrets/secrets.example.yaml /tmp/secrets.yaml; then
+            echo "::error::a --dry-run modified the secrets file"
+            exit 1
+          fi
+
   caddy:
     runs-on: ubuntu-latest
     steps:

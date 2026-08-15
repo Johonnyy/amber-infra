@@ -27,6 +27,8 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$REPO_ROOT/install/lib/env.sh"
 # shellcheck source=lib/secrets.sh
 . "$REPO_ROOT/install/lib/secrets.sh"
+# shellcheck source=lib/manifest.sh
+. "$REPO_ROOT/install/lib/manifest.sh"
 # shellcheck source=lib/docker.sh
 . "$REPO_ROOT/install/lib/docker.sh"
 # shellcheck source=lib/caddy.sh
@@ -140,6 +142,13 @@ esac
 preflight_ports
 preflight_upstream "$APP" "$UPSTREAM"
 preflight_image "$IMAGE"
+# What the app says it needs, checked against what it was declared with — here, in the
+# preflight block, because this is the last point at which nothing has been written.
+#
+# The guard this replaces ran three hundred lines later, after ensure_caddy and
+# secrets_render_env had already mutated the box, so "refuse rather than deploy
+# something that cannot work" was not actually what it did.
+manifest_check "$APP" "$SECRETS_FILE"
 if [ "$ROLE" = "core" ]; then
   preflight_image "$(secrets_get '.sync_store.image')"
 fi
@@ -200,43 +209,70 @@ SYNC_URL="$(secrets_require '.sync_store.url')"
 # and registration is skipped without one. Nothing discovers it and nothing says why.
 #
 # This used to be `if [ "$APP" = "amber" ]`, which was correct for the one app that
-# existed and wrong for the next one.
-PREFIX="$(secrets_get ".apps.\"$APP\".env_prefix")"
-if [ -z "$PREFIX" ]; then
-  PREFIX="AGENT_MCP"
-  # A file predating env_prefix still installs Amber correctly. New apps declare it.
-  [ "$APP" = "amber" ] && PREFIX="AMBER_MCP"
-fi
-PREFIX="${PREFIX%_}"
-
-# Cross-check the prefix against the keys the app was actually declared with, and
-# stop rather than deploy something that cannot work.
+# existed and wrong for the next one. Then it was a default of AGENT_MCP, which is
+# correct for most apps and silently wrong for exactly the two that matter.
 #
-# The silent failure this catches: a stanza written with AGENT_MCP_KEYS for an app
-# that reads BLOOM_MCP_* gets no bearer keys, so its MCP server is never mounted, and
-# no public URL, so it never registers. It installs, it starts, it serves, and the
-# only symptom is the word "unregistered" in a status report days later. Better to
-# refuse here, where the fix is one line away.
-if ! secrets_get ".apps.\"$APP\".env | keys | .[]" | grep -q "^${PREFIX}_"; then
-  DECLARED="$(secrets_get ".apps.\"$APP\".env | keys | .[]" | tr '
-' ' ')"
-  die "'$APP' is declared with env keys that do not match its prefix.
+# It is now read from <app>/manifest.yaml, where CI has already checked that it agrees
+# with the names of the three keys below — so the prefix and the keys it governs
+# cannot disagree, rather than merely being unlikely to.
+PREFIX="$(manifest_env_prefix "$APP")"
+DECLARED_PREFIX="$(secrets_get ".apps.\"$APP\".env_prefix")"
+DECLARED_PREFIX="${DECLARED_PREFIX%_}"
 
-     env_prefix resolves to ${PREFIX}, so this app reads ${PREFIX}_* — but its env
-     block holds: ${DECLARED:-(nothing)}
+if [ -z "$PREFIX" ]; then
+  # No manifest. On a current checkout this is unreachable — CI fails a compose file
+  # without one — so it means the box is running an older amber-infra than the app.
+  # Fall back rather than refuse: an old box should still install, loudly.
+  PREFIX="${DECLARED_PREFIX:-AGENT_MCP}"
+  [ -z "$DECLARED_PREFIX" ] && [ "$APP" = "amber" ] && PREFIX="AMBER_MCP"
+  warn "no $APP/manifest.yaml in this checkout — falling back to '$PREFIX'.
+     Update amber-infra; the manifest is what makes this checkable."
+elif [ -n "$DECLARED_PREFIX" ] && [ "$DECLARED_PREFIX" != "$PREFIX" ]; then
+  # Never silently prefer one. Quietly preferring a source is how the original bug
+  # survived being looked at.
+  die "'$APP' disagrees with itself about its env prefix.
+     $APP/manifest.yaml says:            $PREFIX
+     apps.$APP.env_prefix in secrets says: $DECLARED_PREFIX
 
-     Keys under any other prefix are silently ignored: the app would start, serve,
-     never mount its MCP server and never register, with nothing saying why.
-
-     Fix apps.$APP in $SECRETS_FILE — set env_prefix, and name its keys to match
-     (e.g. ${PREFIX}_KEYS) — then re-run this command."
+     The manifest is the authority, so the fix is to correct or delete the
+     env_prefix line in $SECRETS_FILE — but only you can say which of the two is
+     what the app actually reads."
 fi
 
-env_set "$ENV_FILE" "${PREFIX}_PUBLIC_URL" "https://$DOMAIN"
-env_set "$ENV_FILE" "${PREFIX}_SYNC_STORE_URL" "$SYNC_URL"
-env_set "$ENV_FILE" "${PREFIX}_SYNC_STORE_TOKEN" "$APP_TOKEN"
-env_protect "$ENV_FILE"
-ok "${PREFIX}_PUBLIC_URL / _SYNC_STORE_URL / _SYNC_STORE_TOKEN set in $ENV_FILE"
+# The keys install.sh owns. Anything set for these in secrets.yaml is overwritten
+# here on every run, which is why the example file deliberately does not list them.
+#
+# Driven by the manifest rather than hardcoded, so an app that needs a fourth derived
+# value — Bloom's BLOOM_PUBLIC_URL, the origin an OAuth provider redirects back to —
+# declares it instead of being special-cased here. It was a hand-maintained CHANGEME
+# that could silently disagree with the domain Caddy actually serves.
+if manifest_have "$APP"; then
+  DERIVED_SET=""
+  while IFS= read -r key; do
+    [ -z "$key" ] && continue
+    case "$(manifest_source "$APP" "$key")" in
+      public_url)        value="https://$DOMAIN" ;;
+      app_url)           value="https://$DOMAIN" ;;
+      sync_store_url)    value="$SYNC_URL" ;;
+      sync_store_token)  value="$APP_TOKEN" ;;
+      # Set below, next to the systemd units it depends on — writing it here would
+      # claim the watcher exists before it has been installed.
+      update_command)    continue ;;
+      *) warn "$APP/manifest.yaml: $key is derived from an unknown source; skipping"; continue ;;
+    esac
+    env_set "$ENV_FILE" "$key" "$value"
+    DERIVED_SET="$DERIVED_SET $key"
+  done < <(manifest_names_of_kind "$APP" '^derived$')
+  env_protect "$ENV_FILE"
+  ok "set in $ENV_FILE:$DERIVED_SET"
+else
+  # Stale checkout, no manifest. The original three, under the resolved prefix.
+  env_set "$ENV_FILE" "${PREFIX}_PUBLIC_URL" "https://$DOMAIN"
+  env_set "$ENV_FILE" "${PREFIX}_SYNC_STORE_URL" "$SYNC_URL"
+  env_set "$ENV_FILE" "${PREFIX}_SYNC_STORE_TOKEN" "$APP_TOKEN"
+  env_protect "$ENV_FILE"
+  ok "${PREFIX}_PUBLIC_URL / _SYNC_STORE_URL / _SYNC_STORE_TOKEN set in $ENV_FILE"
+fi
 
 if [ "$APP" = "amber" ]; then
   # The voice self-update needs a host-side watcher, because there is no systemctl

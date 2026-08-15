@@ -43,25 +43,36 @@ slip cannot expose an app past TLS.
 
 ## Adding an app
 
-Three things, and `install.sh` checks the first two before it touches the box:
+Four things, and `install.sh` checks the first three before it touches the box:
 
-1. **A stanza under `apps:`** in `/etc/amber-infra/secrets.yaml` — domain, upstream,
-   pinned image, and its `*_MCP_KEYS` token. Aperture's Servers tab writes this for
-   you (Declare); the commented template at the bottom of `secrets.example.yaml` is
-   the same thing by hand.
+1. **`<name>/manifest.yaml` committed to this repo** — what the app needs, in the
+   app's own words: its `env_prefix`, and every key it reads with a `kind` saying who
+   fills it (`generated:*` the box, `supplied` you, `derived` `install.sh`, `config` a
+   default). Model it on `amber/manifest.yaml`.
 
-   Set **`env_prefix`** too if the app embeds `agent-runtime` as well as
-   `agent-mcp-py`. Such an app owns a single prefix and builds both libraries'
-   settings from it, so the three discovery keys have to be written under that
-   prefix — `AMBER_MCP` for Amber, `BLOOM_MCP` for Bloom. The default, `AGENT_MCP`,
-   is right for every plain agent-mcp-py app. Getting it wrong fails **silently**:
-   the keys land under a prefix the app ignores, so it starts, serves, and never
-   registers, and the only symptom is an empty row in `status.sh`.
+   This is the authority for the prefix, and it is a file rather than a habit because
+   getting the prefix wrong fails **silently**: an app that embeds `agent-runtime` as
+   well as `agent-mcp-py` owns a single prefix and builds both libraries' settings
+   from it, so keys under any other prefix are not an error — `extra="ignore"` means
+   they are simply never read. The app starts, serves, never mounts its MCP server and
+   never registers, and the only symptom is the word "unregistered" in a status report
+   days later.
+
+   CI asserts that the three derived keys are spelled exactly
+   `${env_prefix}_PUBLIC_URL`, `_SYNC_STORE_URL` and `_SYNC_STORE_TOKEN`, so the
+   prefix and the key names cannot drift apart. Run the same checks locally with
+   `bash -c '. install/lib/manifest.sh && manifest_lint_all'`.
 2. **`<name>/docker-compose.prod.yml` committed to this repo.** There is deliberately
    no generic template. An app's volume, health check and loopback port binding are
    its own, and a rendered guess is how you get a container that starts and stores
    nothing. Model it on `sync-store/docker-compose.prod.yml`.
-3. **DNS already pointing here**, because Caddy asks for a certificate the moment the
+3. **A stanza under `apps:`** in `/etc/amber-infra/secrets.yaml` — domain, upstream,
+   pinned image, and the keys the manifest says you have to supply. Aperture's Servers
+   tab writes this for you; the commented template at the bottom of
+   `secrets.example.yaml` is the same thing by hand. `env_prefix` here is optional and
+   only cross-checked — the manifest decides, and `install.sh` refuses rather than
+   picking a side if the two disagree.
+4. **DNS already pointing here**, because Caddy asks for a certificate the moment the
    site block appears and Let's Encrypt rate-limits failures per domain.
 
 Nothing is declared before it exists. An app in this file is a claim that the app is

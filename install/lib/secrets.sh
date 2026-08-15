@@ -69,15 +69,23 @@ secrets_sync_store_keys() {
 }
 
 secrets_render_env() {  # secrets_render_env APP DEST — write apps.<APP>.env into DEST
-  local app="$1" dest="$2" key value
+  local app="$1" dest="$2" key value placeholders=""
   secrets_check
   step "Rendering $dest from $SECRETS_FILE (.apps.$app.env)"
   run install -m 600 -o root -g root /dev/null "$dest"
   while IFS= read -r key; do
     [ -z "$key" ] && continue
     value="$(secrets_get ".apps.\"$app\".env.\"$key\"")"
+    # This copy is verbatim and always has been, which is how the word CHANGEME ends
+    # up mounted as a live bearer token on a public HTTPS endpoint. install.sh's
+    # manifest_check refuses that before anything is written, but only for an app that
+    # has a manifest and only for keys it marks required — so say it here too, for
+    # everything else. Named rather than counted: "3 placeholders" sends you looking.
+    case "$value" in *CHANGEME*) placeholders="$placeholders $key" ;; esac
     env_set "$dest" "$key" "$value"
   done < <(yq -r ".apps.\"$app\".env // {} | keys | .[]" "$SECRETS_FILE")
   env_protect "$dest"
   ok "wrote $dest"
+  [ -z "$placeholders" ] || warn "$dest still holds placeholder values for:$placeholders
+     Whatever reads them will receive the literal string CHANGEME."
 }

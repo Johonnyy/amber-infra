@@ -1,0 +1,100 @@
+# What Bloom needs, in Bloom's own words. See amber/manifest.yaml for the format and
+# install/lib/manifest.sh for why this file exists at all.
+#
+# Bloom is the app the guessing actually broke: its stanza was written with
+# AGENT_MCP_KEYS, which it does not read, so it installed, started, served, never
+# mounted its MCP server and never registered — and the only symptom was the word
+# "unregistered" in a status report. `repairBloom` was ~100 lines of bespoke repair
+# for that one incident. This file is what makes the repair generic and the incident
+# impossible.
+manifest: 1
+app: bloom
+
+# Like Amber, Bloom embeds both agent-mcp-py and agent-runtime and builds each
+# library's settings from a single prefix with `_env_file=None`. AGENT_MCP_* or
+# AGENT_RUNTIME_* keys would be silently ignored — see bloom/app/config.py.
+env_prefix: BLOOM_MCP
+
+role: core
+
+release:
+  repo: Johonnyy/bloom
+  package: bloom
+
+keys:
+  # --- install.sh computes these -----------------------------------------------
+  - { name: BLOOM_MCP_PUBLIC_URL,       kind: derived, source: public_url }
+  - { name: BLOOM_MCP_SYNC_STORE_URL,   kind: derived, source: sync_store_url }
+  - { name: BLOOM_MCP_SYNC_STORE_TOKEN, kind: derived, source: sync_store_token, secret: true }
+  - name: BLOOM_PUBLIC_URL
+    kind: derived
+    source: app_url
+    why: >
+      Not an agent-mcp key: the public origin a provider redirects the browser back
+      to, registered with each provider as https://<this>/admin/oauth/<p>/callback.
+      It is exactly `https://<domain>`, so it was a hand-maintained CHANGEME that
+      could silently disagree with the domain Caddy actually serves.
+
+  # --- the box generates these --------------------------------------------------
+  - name: BLOOM_MCP_KEYS
+    kind: generated:token
+    peers: [amber]
+    label: Bearer tokens peer agents present to run_task
+    why: The same value has to reach Amber as AMBER_MCP_PEER_TOKEN.
+  - name: BLOOM_ADMIN_KEYS
+    kind: generated:token
+    peers: [Aperture]
+    label: Bearer tokens Aperture presents to /admin
+    why: >
+      Deliberately a different set from BLOOM_MCP_KEYS — the GUI edits configuration,
+      a peer agent spends money, and one leaked token must not buy both.
+  - name: BLOOM_FERNET_KEYS
+    # NOT openssl-hex, despite the _KEYS suffix. That suffix is exactly what made the
+    # old name-based classifier offer this to a hex generator, which wrote
+    # `<64 hex chars>-fernet-generate-key` into it — a value Bloom refuses to boot
+    # with. Declaring the generator is what stops a name rule guessing wrong.
+    kind: generated:fernet
+    label: Encryption at rest for OAuth grants
+    why: >
+      32 bytes of urlsafe base64, validated at startup. Comma-separated, NEWEST
+      FIRST: the head encrypts, all of them decrypt, so rotating is prepend-and-
+      restart rather than a migration. Losing it does not lose the connections
+      politely — the rows survive, unreadable, and every account has to be
+      re-authorised through a browser one at a time.
+
+  # --- only you have these ------------------------------------------------------
+  - name: BLOOM_OPENROUTER_API_KEY
+    kind: supplied
+    # The SAME credential id as Amber's AMBER_OPENROUTER_API_KEY. One saved key, two
+    # apps, two different env var names, zero retyping.
+    credential: openrouter-api-key
+    label: OpenRouter API key
+    help_url: https://openrouter.ai/keys
+    why: >
+      Every configured agent runs through OpenRouter via agent-runtime. Without it the
+      admin API still serves, which is deliberate: editing configurations before you
+      have a key is a real workflow.
+
+  # --- settings with defaults ---------------------------------------------------
+  - { name: BLOOM_DB_PATH,       kind: config, default: /data/bloom.db }
+  - { name: BLOOM_FEATURE_OAUTH, kind: config, default: "true" }
+
+  # --- per-provider OAuth credentials -------------------------------------------
+  # Named by each manifest in bloom/app/providers/*.toml rather than by the BLOOM_
+  # prefix, because the set of providers is not known when the settings class is
+  # defined. Optional, and declared here only so the checklist can offer them as a
+  # group and the vault can fill them.
+  - name: BLOOM_OAUTH_SPOTIFY_CLIENT_ID
+    kind: supplied
+    credential: spotify-client-id
+    label: Spotify client ID
+    help_url: https://developer.spotify.com/dashboard
+    required: false
+    group: spotify
+  - name: BLOOM_OAUTH_SPOTIFY_CLIENT_SECRET
+    kind: supplied
+    credential: spotify-client-secret
+    label: Spotify client secret
+    help_url: https://developer.spotify.com/dashboard
+    required: false
+    group: spotify
