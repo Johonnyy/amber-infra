@@ -21,7 +21,7 @@ ensure_docker() {
     step "Installing Docker"
     run bash -c 'curl -fsSL https://get.docker.com | sh'
     run systemctl enable --now docker
-    ok "docker installed"
+    if dry; then ok "docker would be installed"; else ok "docker installed"; fi
   fi
   ensure_compose_plugin
 }
@@ -33,14 +33,37 @@ ensure_compose_plugin() {
   fi
   step "Installing the docker compose plugin"
   run apt-get install -y docker-compose-plugin
+  # A dry run skipped the install above, so asserting its result can only fail —
+  # and a rehearsal that dies on the absence of something it deliberately did not
+  # create is a false alarm, which is worse than no rehearsal at all. Same shape as
+  # wait_healthy and wait_for_http, which return early for the same reason.
+  if dry; then
+    ok "docker compose plugin would be installed"
+    return 0
+  fi
   docker compose version >/dev/null 2>&1 || die "docker compose still unavailable after install"
 }
 
 compose() {  # compose DIR ARGS... — always -f the prod file, always from its dir
   local dir="$1"; shift
   local file
-  file="$(ls "$dir"/docker-compose*.yml 2>/dev/null | head -n1)"
-  [ -n "$file" ] || die "no compose file in $dir"
+  # `|| true` is load-bearing: common.sh sets pipefail, so a glob that matches
+  # nothing makes `ls` fail, fails the pipeline, and takes the whole script down at
+  # the assignment — before the check below ever runs. rollback.sh already spells the
+  # same idiom this way.
+  file="$(ls "$dir"/docker-compose*.yml 2>/dev/null | head -n1 || true)"
+  if [ -z "$file" ]; then
+    # On a first install the compose file is put here by a `run install` a few lines
+    # earlier — which a dry run skipped. Name the path it would have had and keep
+    # printing, rather than aborting the rehearsal over a file the rehearsal itself
+    # chose not to create. Outside a dry run this is still fatal, because then the
+    # absence is real.
+    if dry; then
+      file="$dir/docker-compose.prod.yml"
+    else
+      die "no compose file in $dir"
+    fi
+  fi
   run docker compose -f "$file" --project-directory "$dir" "$@"
 }
 
