@@ -321,10 +321,17 @@ manifest_lint() {  # manifest_lint APP
     suffix="${src##*:}"
     got="$(manifest_rows "$app" | awk -F'\t' -v s="${src%%:*}" '$6 == s { print $1 }')"
     count="$(grep -c . <<<"$got" || true)"
-    [ -n "$got" ] && [ "$count" = "1" ] || {
-      _lint_fail "$app/manifest.yaml: expected exactly one key with source '${src%%:*}', found ${got:-none}"
+    # An explicit `if`, not `A && B || C`: that form runs C whenever the *chain* is
+    # false, which happens to be what is wanted here and is not what it looks like.
+    # Spelling it out costs one line and stops the next reader having to work that out.
+    if [ -z "$got" ] || [ "$count" != "1" ]; then
+      # `$got` is newline-separated, so printing it raw showed only the first name and
+      # read as though the right key HAD been found. Say how many, and name them all.
+      _lint_fail "$app/manifest.yaml: expected exactly one key with source '${src%%:*}', found $(
+        if [ -z "$got" ]; then echo none; else echo "$count: $(tr '\n' ' ' <<<"$got")"; fi
+      )"
       continue
-    }
+    fi
     [ "$got" = "${prefix}_${suffix}" ] || _lint_fail \
       "$app/manifest.yaml: source '${src%%:*}' is declared as '$got', but env_prefix is '$prefix' so it must be '${prefix}_${suffix}'"
   done
