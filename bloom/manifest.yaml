@@ -80,30 +80,18 @@ keys:
   - { name: BLOOM_FEATURE_OAUTH, kind: config, default: "true" }
 
 
-# Credentials whose *set* is not known when this file is written.
+# Provider client credentials are no longer named here, and no longer *needed* here.
 #
-# Bloom's providers are one TOML each in `app/providers/`, and adding one is meant to
-# be that file and nothing else anywhere — no Python, no new tools, and emphatically no
-# amber-infra release. Spotify's client id and secret were listed above as `supplied`
-# keys, which quietly undid that: every connection you ever wanted would have needed an
-# entry here first, and a deploy of this repo to go with it.
+# They used to be: Bloom read a provider's client id and secret from the process
+# environment, so connecting Spotify meant an entry in secrets.yaml, a reconcile and
+# a container restart — a deployment operation standing in front of something a user
+# should be able to do from a form. This file declared the `BLOOM_OAUTH_` prefix as
+# a `dynamic_keys` pattern so at least the *members* did not need an amber-infra
+# release each.
 #
-# So the *pattern* is declared instead of the members. Two consumers read it:
-#
-#   * install.sh, which needs to know that a key under this prefix is legitimate rather
-#     than an orphan wearing the wrong prefix — the check that would otherwise refuse
-#     BLOOM_OAUTH_GOOGLE_CLIENT_ID as a mistake;
-#   * Aperture, which asks the running Bloom for its providers
-#     (`GET /admin/oauth/providers`, which reports `client_id_env` and
-#     `client_secret_env` per provider) and offers to fill whichever are unconfigured.
-#
-# Nothing here has to change when a provider is added. That is the whole point.
-dynamic_keys:
-  - prefix: BLOOM_OAUTH_
-    label: OAuth client credentials
-    # How Aperture finds the live list. The only value this repo understands today;
-    # an app with a different discovery route declares a different one.
-    discover: bloom-oauth-providers
-    why: >
-      One pair per connected service, named by that provider's own manifest. Get them
-      from the provider's developer console — Bloom never invents them.
+# A connection now carries its own client id and secret, entered in Aperture and
+# encrypted at rest beside the grant it authorises. The environment is still read as
+# a deployment-wide default when a connection carries none — set
+# BLOOM_OAUTH_<PROVIDER>_CLIENT_ID / _CLIENT_SECRET below to share one registered app
+# across every connection to that provider — but nothing requires it, so there is no
+# pattern left to declare.
