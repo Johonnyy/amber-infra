@@ -124,6 +124,15 @@ for health, and **reverts to the previous image if she does not come back**. Tha
 last part matters more here than anywhere else: an update that leaves Amber unable
 to hear the next instruction is the one failure that cannot fix itself.
 
+"Previous" means the last image `/var/lib/amber-infra/deploy-history` records as
+having been healthy on *this box* — including the one running right now, which
+`update-app.sh` records as the baseline before it touches anything. It did not
+always: the journal only gained rows from successful updates through the script, and
+nothing in `install/` writes one, so the very first update of a freshly installed app
+found no known-good image and refused to revert — leaving the box on the broken pin,
+in the one case where nobody had yet watched that app survive a deploy. Bloom 0.2.0
+is where that was discovered.
+
 The alternatives were mounting the Docker socket into her container — root on the
 host, reachable by anything the model can be talked into invoking — or an updater
 sidecar holding the socket behind an HTTP endpoint. A file is less surface than

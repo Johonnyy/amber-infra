@@ -17,6 +17,8 @@
 #
 # What it does, in order, each step idempotent:
 #   sentinel   cleared FIRST, so a failure here does not wedge the .path trigger
+#   baseline   the running image is recorded as known-good if the box can see it is,
+#              which is what arms the revert on an app's very first update
 #   pin        rewritten only when --to was given, and never to a floating tag
 #   env        new keys from the image's baked-in .env.example, defaults carried,
 #              existing values never clobbered
@@ -85,6 +87,36 @@ if [ -f "$SENTINEL" ]; then
 fi
 
 BEFORE="$(image_of "$COMPOSE_FILE")"
+
+# 1b. Arm the revert.
+#
+# `$HISTORY` only ever gained a row from a *successful* update through this script,
+# and nothing in install/ writes one — so on the first update of a freshly installed
+# app there was no known-good image, the revert below refused with "nothing to revert
+# to", and the box was left sitting on the broken pin. That is the exact update where
+# the net matters most: nobody has yet watched this app survive a deploy.
+#
+# So the baseline is what is *running right now*, recorded before anything is pulled
+# or rewritten, and only when the box can see for itself that it is good. "Good" is
+# wait_healthy's own definition, so the thing that arms the revert and the thing that
+# triggers it cannot disagree.
+run mkdir -p "$(dirname "$HISTORY")"
+if ! dry && [ -n "$BEFORE" ]; then
+  BASELINE=0
+  # `if` rather than `[ … ] && …` as the last command of a branch: under `set -e` a
+  # false test there makes the whole `case` exit non-zero and takes the script with it.
+  case "$(container_health "$APP")" in
+    healthy) BASELINE=1 ;;
+    none)    if [ "$(container_state "$APP")" = "running" ]; then BASELINE=1; fi ;;
+  esac
+  # Read as "this box saw $APP healthy on this image", which is exactly what the
+  # revert below looks for and what `rollback.sh --list` should show.
+  if [ "$BASELINE" = "1" ] \
+     && ! awk -F'\t' -v a="$APP" -v i="$BEFORE" '$2 == a && $4 == i && $5 == "ok"' \
+          "$HISTORY" 2>/dev/null | grep -q .; then
+    printf '%s\t%s\t%s\t%s\tok\n' "$(iso_now)" "$APP" "$BEFORE" "$BEFORE" >> "$HISTORY"
+  fi
+fi
 
 # 2. The new pin, if one was asked for.
 if [ -n "$TO" ]; then
@@ -175,8 +207,13 @@ warn "$APP did not become healthy — reverting"
 PREVIOUS="$(awk -F'\t' -v a="$APP" '$2 == a && $5 == "ok" {print $4}' "$HISTORY" 2>/dev/null \
   | grep -v "^$AFTER\$" | tail -n1)"
 if [ -z "$PREVIOUS" ]; then
-  die "$APP is unhealthy on $AFTER and there is no earlier known-good image to revert to.
-     docker logs $APP --tail 100
+  # Reachable only when the box has never seen this app healthy — including just
+  # before this run, since step 1b records that. So there is genuinely nowhere to go
+  # back to, and the compose file is still pinned to $AFTER: say both, because the
+  # state the box is left in is the part that matters to whoever reads this.
+  die "$APP is unhealthy on $AFTER and this box has never seen it healthy on any image,
+     so there is nothing to revert to. It is still pinned to $AFTER.
+     The last log lines are above. Then:
      deploy/rollback.sh $APP --list"
 fi
 

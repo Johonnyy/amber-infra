@@ -98,27 +98,57 @@ container_state() {  # container_state NAME -> running|exited|created|paused|mis
   docker container inspect -f '{{.State.Status}}' "$1" 2>/dev/null || echo missing
 }
 
+# The tell for a crash loop. `unhealthy` and climbing is a process dying at boot;
+# `unhealthy` and steady is a slow start or a probe that cannot reach it. The two
+# want completely different next moves, and the status alone does not distinguish
+# them.
+container_restarts() {  # container_restarts NAME -> integer
+  docker container inspect -f '{{.RestartCount}}' "$1" 2>/dev/null || echo 0
+}
+
+# HEARTBEAT_S: how often the wait below says what it is looking at. Low enough that
+# nobody concludes the script is wedged, high enough not to bury the real output.
+HEARTBEAT_S="${HEARTBEAT_S:-15}"
+
 wait_healthy() {  # wait_healthy NAME TIMEOUT_S
-  local name="$1" timeout="${2:-90}" waited=0 status
+  local name="$1" timeout="${2:-90}" waited=0 status restarts
   if dry; then
     echo "   ${c_yellow}dry-run${c_off} would wait for $name to become healthy"
     return 0
   fi
+  # Progress, not silence. `starting` and `unhealthy` match no branch below, so this
+  # loop used to print *nothing at all* for the full timeout — which made an ordinary
+  # two-minute wait indistinguishable from a hung script, and got a real crash loop
+  # read as "the updater wedged". Whoever is watching should never have to guess
+  # whether anything is still happening.
   while [ "$waited" -lt "$timeout" ]; do
     status="$(container_health "$name")"
     case "$status" in
       healthy) ok "$name is healthy"; return 0 ;;
       # A container with no HEALTHCHECK cannot be waited on meaningfully. Say so
       # rather than sleeping out the timeout and calling it a failure.
+      # `if` rather than `[ … ] && return 0`: as the last command of a case branch a
+      # false test makes the whole `case` exit non-zero, which under `set -e` ends the
+      # caller rather than this wait.
       none)    warn "$name declares no healthcheck — treating 'running' as good enough"
-               [ "$(container_state "$name")" = "running" ] && return 0
+               if [ "$(container_state "$name")" = "running" ]; then return 0; fi
                ;;
       missing) warn "$name does not exist as a container yet" ;;
     esac
     sleep 3
     waited=$((waited + 3))
+    if [ "$waited" -lt "$timeout" ] && [ "$((waited % HEARTBEAT_S))" -lt 3 ]; then
+      restarts="$(container_restarts "$name")"
+      echo "   ${c_blue}···${c_off} $name: ${status}, ${restarts} restart(s), ${waited}s of ${timeout}s"
+    fi
   done
   warn "$name did not become healthy within ${timeout}s (last status: $(container_health "$name"))"
+  # The logs, unprompted. Whoever is watching has just spent the whole timeout
+  # learning nothing, and the answer is nearly always in the last few lines: a
+  # missing key, an unwritable volume, a schema the process refuses to open. Making
+  # them go and run `docker logs` themselves is a step that never had to exist.
+  echo "   ${c_yellow}last 20 log lines from $name${c_off} (docker logs $name for the rest):"
+  docker logs "$name" --tail 20 2>&1 | sed 's/^/   | /' || true
   return 1
 }
 
