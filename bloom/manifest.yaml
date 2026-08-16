@@ -74,6 +74,22 @@ keys:
       Every configured agent runs through OpenRouter via agent-runtime. Without it the
       admin API still serves, which is deliberate: editing configurations before you
       have a key is a real workflow.
+  - name: BLOOM_SEARCH_API_KEY
+    kind: supplied
+    # Same credential id as amber/manifest.yaml's AMBER_SEARCH_API_KEY: one Tavily key,
+    # two apps, two prefixed names, entered once.
+    credential: tavily-api-key
+    label: Tavily API key
+    help_url: https://tavily.com
+    # Optional because only the *builder* needs it. Bloom runs agents, serves /admin
+    # and answers run_task perfectly well without one, and refusing to install over a
+    # feature you may never use is the wrong trade. Note this is stricter than Amber's
+    # use of the same key: she degrades to DuckDuckGo, the builder does not degrade at
+    # all, because an integration written from memory is worse than none.
+    required: false
+    why: >
+      The builder's eyes. Without it POST /admin/builder/build answers 503 rather than
+      letting the model write an integration from memory. Nothing else in Bloom uses it.
 
   # --- settings with defaults ---------------------------------------------------
   - { name: BLOOM_DB_PATH,       kind: config, default: /data/bloom.db }

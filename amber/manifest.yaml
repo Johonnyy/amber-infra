@@ -74,6 +74,23 @@ keys:
     label: OpenRouter API key
     help_url: https://openrouter.ai/keys
     why: The brain, via agent-runtime. Required unless AMBER_FEATURE_LLM=false.
+  - name: AMBER_SEARCH_API_KEY
+    kind: supplied
+    # Shared with bloom/manifest.yaml's BLOOM_SEARCH_API_KEY. Both are Tavily, and a
+    # Tavily key is a Tavily key — the whole reason `credential` is an id rather than
+    # a variable name.
+    credential: tavily-api-key
+    label: Tavily API key
+    help_url: https://tavily.com
+    # Optional, and deliberately so: AMBER_SEARCH_PROVIDER defaults to `auto`, which
+    # falls back to scraping DuckDuckGo's HTML results page without a key. Refusing to
+    # install over a missing search key would be absurd. It is still the single
+    # biggest answer-quality win available, which is exactly why it needs to be a row
+    # somebody can SEE — undeclared, it appeared nowhere in Aperture at all.
+    required: false
+    why: >
+      Web search. Without it `auto` degrades to scraping DuckDuckGo's HTML, which is
+      best-effort and breaks when their markup does.
 
   # --- settings with defaults ---------------------------------------------------
   - { name: AMBER_TIMEZONE, kind: config, default: America/New_York }
