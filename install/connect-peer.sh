@@ -244,6 +244,32 @@ peermap_names() {  # peermap_names MAP -> one name per line
   printf '%s' "$1" | tr ',' '\n' | sed 's/[[:space:]]//g' | grep -v '^$' | cut -d= -f1 || true
 }
 
+#: Whether APP's KEY lists CALLER under `peers:`.
+#:
+#: awk rather than `grep -qxF`, and the reason is copied verbatim from
+#: install/lib/manifest.sh: `grep -q` exits at the first match, the producer dies on
+#: the closed pipe, and under `set -o pipefail` the pipeline reports failure — so the
+#: caller concludes the peer was NOT listed, which is the exact opposite of what
+#: happened. awk consumes all of its input, so there is no closed pipe and no
+#: spurious failure. (`manifest_peers` currently ends in `|| true`, which happens to
+#: mask this; relying on an implementation detail of another file for correctness
+#: here is not a thing to leave in place.)
+peers_include() {  # peers_include APP KEY CALLER
+  manifest_peers "$1" "$2" | awk -v c="$3" '$0 == c { found = 1 } END { exit !found }'
+}
+
+#: The KEY on CALLEE whose `peers:` names CALLER, or "" — the accepting half of a
+#: link. Read from the callee's own manifest, because that is the app that decides
+#: what it reads; the caller's `peer_key` hint is per-pair and hardcodes one app name.
+accepting_key_of() {  # accepting_key_of CALLEE CALLER
+  local callee="$1" caller="$2" key
+  while IFS= read -r key; do
+    [ -n "$key" ] || continue
+    if peers_include "$callee" "$key" "$caller"; then printf '%s' "$key"; return 0; fi
+  done < <(manifest_names_of_kind "$callee" '^generated:token$')
+  return 0
+}
+
 # ==== what the manifests say =================================================
 
 manifest_have "$FROM" || die "no $FROM/manifest.yaml in this checkout.
@@ -266,11 +292,7 @@ PEER_TOKEN_KEY="$(manifest_names_of_kind "$FROM" '^peer_token$' | head -n1)"
 #: which stops being true the moment there is a third app. The hint is still read
 #: below, as a cross-check: if the two disagree, one of the manifests is stale, and
 #: that is worth a warning rather than a silent choice between them.
-accepting_key=""
-while IFS= read -r _name; do
-  [ -n "$_name" ] || continue
-  if manifest_peers "$TO" "$_name" | grep -qxF "$FROM"; then accepting_key="$_name"; break; fi
-done < <(manifest_names_of_kind "$TO" '^generated:token$')
+accepting_key="$(accepting_key_of "$TO" "$FROM")"
 
 declared_key="$(manifest_peer_key "$FROM" "$PEER_TOKEN_KEY")"
 declared_of="$(manifest_peer_of "$FROM" "$PEER_TOKEN_KEY")"
@@ -466,11 +488,7 @@ if [ -n "$others" ]; then
   while IFS= read -r other; do
     [ -n "$other" ] || continue
     manifest_have "$other" || continue
-    other_key=""
-    while IFS= read -r _name; do
-      [ -n "$_name" ] || continue
-      if manifest_peers "$other" "$_name" | grep -qxF "$FROM"; then other_key="$_name"; break; fi
-    done < <(manifest_names_of_kind "$other" '^generated:token$')
+    other_key="$(accepting_key_of "$other" "$FROM")"
     [ -n "$other_key" ] || continue
     other_token="$(keylist_get "$(secrets_get ".apps.\"$other\".env.\"$other_key\"")" "$FROM")"
     [ -n "$other_token" ] || continue

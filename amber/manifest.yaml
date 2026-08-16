@@ -92,10 +92,15 @@ keys:
     required: false
     label: Peers Amber may call
     why: >
-      Amber's broker is built from load_static_peers(AMBER_MCP_PEERS) alone; she never
-      consults the sync-store's discovered layer. So a peer missing here is uncallable
-      with no error anywhere — Bloom can register perfectly, appear in GET /servers,
-      and still be offered to her as nothing at all.
+      An override, not the only source — but it was the only source, and that was an
+      outage with no symptom. Amber's broker was built from
+      load_static_peers(AMBER_MCP_PEERS) alone, and passed that same dict as the
+      resolver, which short-circuits agent_mcp's registry entirely. So a peer missing
+      here was uncallable with no error anywhere: Bloom registered perfectly, appeared
+      in GET /servers, and was offered to her as nothing at all. She now unions this
+      with what the sync store has discovered (amber_v2/app/peers.py), with this
+      winning — so setting it is how you PIN a peer during an incident, not how you
+      make one reachable. install/connect-peer.sh writes it.
   - name: AMBER_MCP_PEER_TOKEN
     kind: peer_token
     peer_of: bloom
@@ -105,3 +110,7 @@ keys:
     why: >
       Must equal the token half of Bloom's BLOOM_MCP_KEYS ("amber:<token>") — two
       values that have to match exactly. A mismatch is a 401 on every delegated task.
+      ONE token is applied to EVERY peer in the map above, because load_static_peers
+      takes a single token, so two peers wanting different bearers cannot be expressed
+      here at all. That is what the registry's per-server credential is for.
+      connect-peer.sh sets both and warns the moment the map outgrows this key.

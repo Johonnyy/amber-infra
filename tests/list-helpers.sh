@@ -46,6 +46,24 @@ have() { command -v "$1" >/dev/null 2>&1; }
 secrets_get() { echo ""; }
 container_health() { echo missing; }
 sync_store_up() { return 1; }
+
+# Bloom as it really is: two generated:token keys, deliberately for different
+# callers. Which one a peer presents from is a question about blast radius — agents
+# spend money, the GUI edits configuration — so it must be answered by the manifest
+# and never by the key's name.
+manifest_peers() {  # manifest_peers APP KEY
+  case "$1/$2" in
+    bloom/BLOOM_MCP_KEYS)   printf 'amber\n' ;;
+    bloom/BLOOM_ADMIN_KEYS) printf 'Aperture\n' ;;
+    *) : ;;
+  esac
+}
+manifest_names_of_kind() {  # manifest_names_of_kind APP REGEX
+  case "$1" in
+    bloom) printf 'BLOOM_MCP_KEYS\nBLOOM_ADMIN_KEYS\n' ;;
+    *) : ;;
+  esac
+}
 # shellcheck source=/dev/null
 . "$BLOCK"
 
@@ -114,6 +132,21 @@ eq "plain base url"             "$(strip https://bloom.x)" "https://bloom.x"
 eq "trailing slash"             "$(strip https://bloom.x/)" "https://bloom.x"
 eq "an endpoint pasted in"      "$(strip https://bloom.x/mcp)" "https://bloom.x"
 eq "an endpoint with a slash"   "$(strip https://bloom.x/mcp/)" "https://bloom.x"
+
+# The pairing lookup. `peers_include` uses awk rather than `grep -qxF` for the reason
+# install/lib/manifest.sh spells out: grep -q exits at the first match, the producer
+# dies on the closed pipe, and under `set -o pipefail` the pipeline reports failure —
+# so a peer that IS listed reads as absent. That is a false negative on the one
+# question this whole script turns on, so it gets its own assertions.
+echo "== pairing lookup"
+eq "a listed caller matches"    "$(if peers_include bloom BLOOM_MCP_KEYS amber; then echo yes; else echo no; fi)" "yes"
+eq "a stranger does not"        "$(if peers_include bloom BLOOM_MCP_KEYS nobody; then echo yes; else echo no; fi)" "no"
+eq "an unknown key does not"    "$(if peers_include bloom NOPE amber; then echo yes; else echo no; fi)" "no"
+# The distinction that must not be guessed: same app, two lists, two audiences.
+eq "the agent list for an agent" "$(accepting_key_of bloom amber)" "BLOOM_MCP_KEYS"
+eq "the GUI list for the GUI"    "$(accepting_key_of bloom Aperture)" "BLOOM_ADMIN_KEYS"
+eq "no list for a stranger"      "$(accepting_key_of bloom nobody)" ""
+eq "no list for an unknown app"  "$(accepting_key_of nosuchapp amber)" ""
 
 echo
 if [ "$FAILS" -eq 0 ]; then
