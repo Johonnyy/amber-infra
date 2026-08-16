@@ -114,7 +114,11 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-[ -n "$FROM" ] && [ -n "$TO" ] || usage
+# One guard per line, the way declare.sh spells it. `A && B || usage` reads as
+# if-then-else and is not one: C runs whenever the AND-list is false, which happens
+# to be right here and stops being right the moment anyone adds a fourth clause.
+[ -n "$FROM" ] || usage
+[ -n "$TO" ] || usage
 [ "$FROM" != "$TO" ] || die "an app cannot be its own peer"
 secrets_check
 require_cmd yq
