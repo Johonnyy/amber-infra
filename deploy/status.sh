@@ -26,6 +26,25 @@
 # `startedAt` per container. Those are what let a client say *why* an app is
 # unregistered instead of listing the four things it might be.
 #
+# Schema 12 adds PEERING, which is a different relation from registration and was
+# invisible here. An app can be registered, healthy and mounting its MCP server —
+# every green light schema 10 could show — while the one agent that matters cannot
+# call it, because that agent's peer map is empty or presents the wrong bearer. That
+# is not a degraded state anywhere: an empty peer map means the peer is offered as no
+# tools at all, with no error on either side.
+#
+# So each app now reports both directions: `peers` (who it calls, as names and public
+# URLs, read from its LIVE .env), `peerTokenFingerprint` (the digest of the single
+# bearer it presents to them), and `bearerKeys` (who it accepts, per token list, as
+# name + digest). A link is sound when the caller's fingerprint equals the digest of
+# the callee's entry named after the caller — two digests, compared, disclosing
+# neither. `syncStore.servers[].tokenFp` is the same comparison for the discovery
+# path, where the credential comes from the registry rather than an env file.
+#
+# Key names come from each manifest, by `kind`, never from a prefix rule: Bloom keeps
+# two bearer lists on purpose (peer agents vs the GUI), so choosing between them by
+# name would be a guess about what a leaked token buys.
+#
 # Without privilege to read /etc/amber-infra/secrets.yaml it still works: it reports
 # `secretsReadable: false` and falls back to what Docker alone can say. The one thing
 # it will not do is print a secret. Values under `apps.*.env` and every token are
@@ -138,6 +157,58 @@ key_list_json() {  # key_list_json "a:tok,b:tok" -> [{"name":…,"fp":…}]
       | jq -c --arg n "$name" --arg f "$fp" --argjson p "$ph" '. + [{name: $n, fp: $f, placeholder: $p}]')"
   done < <(printf '%s' "$raw" | tr ',' '\n')
   printf '%s' "$out"
+}
+
+# A `name=url,name=url` peer map reduced to [{name, baseUrl, endpoint}].
+#
+# Not a secret: it is a list of names and public hostnames, which is why it can be
+# reported as VALUES while every token beside it is reduced to a digest. That
+# distinction is the whole reason a client can diagnose peering at all — one half of
+# the pairing is safe to show, and comparing a shown URL against a registered one is
+# how a mistyped host becomes visible instead of presenting as "the peer is down".
+#
+# `endpoint` is what agent_runtime's MCPClient will actually open, computed here by
+# the same rule it uses (base + /mcp + a trailing slash). A base URL that already
+# ends in /mcp — the single most common way to write this by hand — produces
+# /mcp/mcp/ there and a 404 that reads as a dead peer, so the resolved endpoint is
+# reported rather than left to be imagined from the base.
+peer_map_json() {  # peer_map_json "a=https://x,b=https://y" -> [{"name":…,"baseUrl":…}]
+  local raw="$1" entry name url out='[]'
+  # `|| [ -n "$entry" ]` for the same reason key_list_json needs it: tr leaves the
+  # final entry unterminated and a bare `while read` drops it — which here would hide
+  # the most recently added peer, i.e. the one being debugged.
+  while IFS= read -r entry || [ -n "$entry" ]; do
+    entry="$(printf '%s' "$entry" | tr -d '[:space:]')"
+    [ -n "$entry" ] || continue
+    case "$entry" in
+      *=*) name="${entry%%=*}"; url="${entry#*=}" ;;
+      # load_static_peers logs and skips an entry with no `=`. Reported the same way
+      # rather than dropped, so a malformed line is visible instead of merely absent.
+      *)   name="$entry";       url=""            ;;
+    esac
+    [ -n "$name" ] || continue
+    out="$(printf '%s' "$out" | jq -c --arg n "$name" --arg u "$url" '
+      ($u | sub("/$"; "")) as $trimmed |
+      . + [{
+        name: $n,
+        baseUrl: $u,
+        endpoint: (if $trimmed == "" then null
+                   elif ($trimmed | endswith("/mcp")) then $trimmed + "/"
+                   else $trimmed + "/mcp/" end)
+      }]')"
+  done < <(printf '%s' "$raw" | tr ',' '\n')
+  printf '%s' "$out"
+}
+
+# The value of one key in a rendered .env, without it ever reaching the output.
+#
+# Reads the LIVE file rather than secrets.yaml on purpose: secrets.yaml is the source
+# and the container is running on whatever was rendered from it last. When those two
+# disagree — which is exactly the state right after a peer is wired and before the app
+# is reconciled — only this one describes the behaviour you are seeing.
+rendered_env_value() {  # rendered_env_value ENV_FILE KEY
+  [ -r "${1:-}" ] || return 0
+  sed -n "s/^$2=//p" "$1" 2>/dev/null | head -n1 | sed -e 's/^"//' -e 's/"$//'
 }
 
 # ==== secrets ================================================================
@@ -273,12 +344,34 @@ else
         SYNC_REACHABLE=true
         # The store answers either {"servers":[…]} or a bare array. Accept both,
         # exactly as agent-mcp-py's PeerRegistry.refresh does.
+        # `tokenFp` is the OTHER half of peering, and the half that has never been
+        # visible from anywhere. The store holds a per-server credential, set only
+        # by PUT /servers/{name}/token, and hands it out on discovery — it is what
+        # agent_mcp's PeerRegistry.refresh loads and what agent_runtime's MCP client
+        # sends as the outbound Authorization. So an agent resolving peers through
+        # discovery presents THIS, not the one in its own env file, and the two can
+        # disagree with nothing anywhere saying so.
+        #
+        # Reduced to a digest before it enters the document, exactly like every other
+        # token here: `has("token")` distinguishes "the store set none" from "this
+        # store is too old to report one", which a bare `// ""` could not.
         SYNC_SERVERS="$(jq -c '(.servers // .) | map({
             name: .name,
             baseUrl: (.base_url // ""),
             lastSeen: (.last_seen // null),
-            stale: (.stale // false)
+            stale: (.stale // false),
+            tokenSet: (has("token") and ((.token // "") != "")),
+            token: (.token // "")
           })' "$SERVERS_BODY" 2>/dev/null || echo '[]')"
+        # The digest is computed in shell, not jq — jq has no sha256 — and the raw
+        # token is dropped in the same pass, so it exists only inside this loop.
+        SYNC_SERVERS="$(
+          printf '%s' "$SYNC_SERVERS" | jq -c '.[]' 2>/dev/null | while IFS= read -r row; do
+            printf '%s' "$row" | jq -c --arg fp \
+              "$(fingerprint "$(printf '%s' "$row" | jq -r '.token // ""')")" \
+              'del(.token) + {tokenFp: (if $fp == "" then null else $fp end)}'
+          done | jq -sc '.'
+        )"
         ;;
       401)
         SYNC_DETAIL="healthy, but rejecting amber's token"
@@ -543,7 +636,21 @@ manifest_json() {  # manifest_json NAME
       # tell them apart.
       default:    (if has("default")  then .default  else null end),
       required:   (if has("required") then .required else true end),
-      secret:     ((.secret // false) or (.name | test("(_KEY|_KEYS|_TOKEN|_SECRET|_PASSWORD|_PASS)$")))
+      secret:     ((.secret // false) or (.name | test("(_KEY|_KEYS|_TOKEN|_SECRET|_PASSWORD|_PASS)$"))),
+      # The three fields that describe cross-app wiring rather than one app.
+      #
+      # `peers` on a generated:token key is the list of CALLERS this app expects to
+      # hear from — the `name:` halves of its compound bearer list. `peerOf`/`peerKey`
+      # on a peer_token key are the other direction: which app holds the matching
+      # value, and under which key.
+      #
+      # Emitted because a client cannot otherwise tell which of several token lists on
+      # one app is the one a given peer presents to. Bloom has two — BLOOM_MCP_KEYS
+      # for agents and BLOOM_ADMIN_KEYS for the GUI — deliberately separate, so a
+      # guess between them is a guess about what a leaked token would buy.
+      peers:      (.peers // []),
+      peerOf:     (.peer_of // null),
+      peerKey:    (.peer_key // null)
     } ]
   }' 2>/dev/null || echo null
 }
@@ -760,6 +867,64 @@ app_json() {  # app_json NAME
       | head -n1 | sed 's/_SYNC_STORE_URL=$//' || true)"
   fi
 
+  # ---- cross-app wiring, from both ends --------------------------------------
+  #
+  # The failure this reports: an app can be registered, healthy, mounting its MCP
+  # server and answering 401 to an unauthenticated probe — every green light this
+  # document already had — while being uncallable by the one agent that matters,
+  # because that agent's peer map is empty or its bearer does not match. Registration
+  # and peering are different relations, and nothing here could tell them apart.
+  #
+  # Three facts make it decidable, and none of them discloses a token:
+  #
+  #   peers        — who this app CALLS, as names and public URLs, from its live .env.
+  #   peerTokenFp  — the digest of the single bearer it presents to them.
+  #   bearerKeys   — who this app ACCEPTS, per token list, as name + digest.
+  #
+  # A link is sound when the caller's peerTokenFp equals the digest of the callee's
+  # entry named after the caller. Two digests, compared — the same trick
+  # syncTokenFingerprint uses for registration, applied to the other relation.
+  #
+  # Key NAMES come from the manifest, by kind, not from a prefix rule. Bloom has two
+  # bearer lists on purpose (agents vs the GUI), and choosing between them by name
+  # would be guessing about what a leaked token buys.
+  local peer_map_key peer_token_key peers_json peer_token_fp bearer_keys
+  peer_map_key="$(printf '%s' "$manifest" \
+    | jq -r '((.keys // [])[] | select(.kind == "peer_map") | .name), "" ' 2>/dev/null | head -n1)"
+  peer_token_key="$(printf '%s' "$manifest" \
+    | jq -r '((.keys // [])[] | select(.kind == "peer_token") | .name), "" ' 2>/dev/null | head -n1)"
+
+  peers_json='[]'
+  if [ -n "$peer_map_key" ]; then
+    peers_json="$(peer_map_json "$(rendered_env_value "$env_file" "$peer_map_key")")"
+  fi
+
+  peer_token_fp=""
+  if [ -n "$peer_token_key" ]; then
+    peer_token_fp="$(fingerprint "$(rendered_env_value "$env_file" "$peer_token_key")")"
+  fi
+
+  # Read from secrets.yaml rather than the rendered .env, because this is the half a
+  # link is REPAIRED at: connect-peer.sh writes the source, and the callee usually
+  # needs no restart for it (agent-mcp-py re-reads nothing, but the value was already
+  # correct if the caller was the one being fixed). Comparing the caller's live value
+  # against the callee's source is the comparison that says "wired, pending a
+  # reconcile" rather than "broken".
+  bearer_keys='[]'
+  if [ "$SECRETS_READABLE" = "true" ]; then
+    local bk_name bk_peers bk_entries
+    while IFS= read -r bk_name; do
+      [ -n "$bk_name" ] || continue
+      bk_peers="$(printf '%s' "$manifest" \
+        | jq -c --arg k "$bk_name" '[(.keys // [])[] | select(.name == $k) | .peers // []] | first // []')"
+      bk_entries="$(key_list_json "$(sget ".apps.\"$name\".env.\"$bk_name\"")")"
+      bearer_keys="$(printf '%s' "$bearer_keys" | jq -c \
+        --arg k "$bk_name" --argjson p "$bk_peers" --argjson e "$bk_entries" \
+        '. + [{key: $k, peers: $p, entries: $e}]')"
+    done < <(printf '%s' "$manifest" \
+      | jq -r '(.keys // [])[] | select(.kind == "generated:token") | .name' 2>/dev/null || true)
+  fi
+
   jq -n \
     --arg     name     "$name" \
     --argjson domain   "$(jnul "$domain")" \
@@ -783,6 +948,11 @@ app_json() {  # app_json NAME
     --argjson manifest "$manifest" \
     --argjson prefixDeclared "$(jnul "$env_prefix_declared")" \
     --argjson prefixRendered "$(jnul "$env_prefix_rendered")" \
+    --argjson peers      "$peers_json" \
+    --argjson peerTokFp  "$(jnul "$peer_token_fp")" \
+    --argjson bearerKeys "$bearer_keys" \
+    --argjson peerMapKey "$(jnul "$peer_map_key")" \
+    --argjson peerTokKey "$(jnul "$peer_token_key")" \
     --argjson registry "$SYNC_SERVERS" \
     '($registry | map(select(.name == $name)) | .[0]) as $r | {
        name: $name, domain: $domain, upstream: $upstream,
@@ -797,7 +967,12 @@ app_json() {  # app_json NAME
        envPrefixDeclared: $prefixDeclared,
        envPrefixRendered: $prefixRendered,
        syncTokenFingerprint: $syncFp,
-       registrationLog: $regLog
+       registrationLog: $regLog,
+       peers: $peers,
+       peerTokenFingerprint: $peerTokFp,
+       bearerKeys: $bearerKeys,
+       peerMapKey: $peerMapKey,
+       peerTokenKey: $peerTokKey
      }'
 }
 
@@ -935,7 +1110,7 @@ jq -n \
   --argjson warnings        "$WARNINGS" \
   '{
      installed: true,
-     schema: 11,
+     schema: 12,
      repoRoot: $repoRoot, commit: $commit, role: $role, primaryDomain: $primaryDomain,
      docker: $docker, compose: $compose,
      tools: $tools,

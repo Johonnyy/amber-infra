@@ -51,6 +51,10 @@ jobs:
       # -x makes shellcheck follow `. install/lib/common.sh`. Without it every
       # shared helper is reported as an unknown command and the output is noise.
       - run: shellcheck -x $(git ls-files '*.sh')
+      # connect-peer.sh takes bearer lists apart and puts them back together, which
+      # is the one kind of code here that fails silently: a merge that drops an entry
+      # revokes a credential and still prints " ok". Needs no yq, docker or network.
+      - run: bash tests/list-helpers.sh
 
   manifest:
     runs-on: ubuntu-latest
@@ -94,6 +98,34 @@ jobs:
           done
           bash install/fill-secrets.sh --dry-run --secrets /tmp/secrets.yaml
           if ! diff -q secrets/secrets.example.yaml /tmp/secrets.yaml; then
+            echo "::error::a --dry-run modified the secrets file"
+            exit 1
+          fi
+      - name: connect-peer.sh rehearses cleanly for every declared pairing
+        # The pairings are read out of the manifests, so this needs no fixture and no
+        # list of app names: any `peer_token` key with a `peer_of` is a link somebody
+        # is expected to be able to make, and it should rehearse without dying.
+        #
+        # --no-registry because CI has no sync-store. That flag skips only the token
+        # PUT; every manifest lookup, stanza check and list merge above it still runs,
+        # which is the part that can be wrong.
+        run: |
+          set -eu
+          cp secrets/secrets.example.yaml /tmp/peers.yaml
+          found=0
+          for d in */manifest.yaml; do
+            app="$(dirname "$d")"
+            for key in $(yq -r '.keys[]? | select(.kind == "peer_token") | .name' "$d"); do
+              to="$(yq -r ".keys[] | select(.name == \"$key\") | .peer_of // \"\"" "$d")"
+              [ -n "$to" ] || continue
+              echo "== $app -> $to"
+              found=$((found + 1))
+              bash install/connect-peer.sh --from "$app" --to "$to" \
+                --no-registry --dry-run --secrets /tmp/peers.yaml
+            done
+          done
+          [ "$found" -gt 0 ] || { echo "::error::no peer_token key declares a peer_of"; exit 1; }
+          if ! diff -q secrets/secrets.example.yaml /tmp/peers.yaml; then
             echo "::error::a --dry-run modified the secrets file"
             exit 1
           fi
