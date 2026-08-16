@@ -22,6 +22,6 @@
 	import common {{APP_NAME}}
 
 	reverse_proxy {{UPSTREAM}} {
-		import streaming
+		import proxied_mcp
 	}
 }

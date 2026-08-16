@@ -59,4 +59,31 @@
 	}
 }
 
+# What every agent-mcp-py app behind this edge needs: (streaming), plus a Host the
+# app's MCP transport will accept.
+#
+# THE HOST REWRITE IS NOT COSMETIC. The MCP SDK's `streamable_http_app` takes
+# host="127.0.0.1" as a default parameter and, when it is not handed explicit
+# transport security, switches DNS-rebinding protection ON with a localhost-only
+# allowlist. Caddy forwards the real hostname, so the app answered
+# `421 Invalid Host header` to every call arriving through here.
+#
+# It hid behind the bearer gate, which runs in front of that check: an
+# unauthenticated probe gets a 401 and never reaches it, so `curl https://…/mcp/`
+# from the box looks healthy while the one correctly-credentialled caller in the
+# ecosystem cannot connect. Rewriting Host to the loopback upstream lands inside the
+# allowlist the SDK made up for itself.
+#
+# {upstream_hostport} is the address this proxy actually dialled, so it stays correct
+# if the port changes. The original hostname is not lost — Caddy still sends
+# X-Forwarded-Host, which is where an app should read it from anyway.
+#
+# agent-mcp-py now passes an allowlist built from its own public_url, which fixes
+# this at the source. Keep this anyway: it costs nothing, and it is what makes a box
+# running an older image work rather than fail in a way that took a day to find.
+(proxied_mcp) {
+	import streaming
+	header_up Host {upstream_hostport}
+}
+
 import snippets/*.caddy
