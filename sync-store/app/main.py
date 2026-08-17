@@ -55,11 +55,14 @@ from app.models import (
     KeywordMapWrite,
     KeywordsRead,
     KeywordWrite,
+    ManifestsRead,
+    ManifestWrite,
     RegisterResponse,
     ServerDescriptor,
     TokenUpdate,
     validate_keyword,
     validate_model_id,
+    validate_provider_name,
 )
 
 logger = logging.getLogger(__name__)
@@ -404,6 +407,77 @@ def build_app(settings: Settings | None = None, *, store: Store | None = None) -
             raise StarletteHTTPException(404, f"no shared keyword named {name!r}")
         logger.info("[models] %s removed by %s", name, caller.caller)
         return {"status": "ok", "keyword": name, "deleted": True}
+
+    # --- shared provider manifests ---
+
+    @app.get("/manifests", response_model=ManifestsRead)
+    async def list_manifests(
+        request: Request, full: bool = True, caller: AuthResult = Caller
+    ) -> ManifestsRead:
+        """Every shared provider manifest.
+
+        The point of this table: a manifest is written once, by whichever install's
+        builder first needed the service, and every other install gets it instead of
+        researching the same API again. Without it, "Bloom can teach itself a new
+        provider" is true per box and the second box repeats the work — including the
+        model spend.
+
+        ``full=false`` omits the TOML documents and returns metadata only, which is
+        what a client deciding *whether* to pull wants: the document is the bulk of
+        every row.
+
+        The TOML is served exactly as it was stored. This store never parsed it, and
+        a reader that trusts it without validating has misunderstood what it is —
+        every manifest here was written by somebody's model.
+        """
+        records = await asyncio.to_thread(_store(request).list_manifests, with_toml=full)
+        return ManifestsRead(manifests=records, count=len(records), generated_at=now_iso())
+
+    @app.get("/manifests/{name}")
+    async def get_manifest(request: Request, name: str, caller: AuthResult = Caller) -> dict:
+        try:
+            provider = validate_provider_name(name)
+        except ValueError as exc:
+            raise StarletteHTTPException(400, str(exc)) from None
+        record = await asyncio.to_thread(_store(request).get_manifest, provider)
+        if record is None:
+            raise StarletteHTTPException(404, f"no shared manifest named {provider!r}")
+        return record
+
+    @app.put("/manifests/{name}")
+    async def set_manifest(
+        request: Request, name: str, body: ManifestWrite, caller: AuthResult = Caller
+    ) -> dict:
+        """Publish a manifest so every other install can use it."""
+        try:
+            provider = validate_provider_name(name)
+        except ValueError as exc:
+            raise StarletteHTTPException(400, str(exc)) from None
+
+        result = await asyncio.to_thread(
+            _store(request).set_manifest,
+            name=provider,
+            toml=body.toml,
+            verified=body.verified,
+            updated_by=caller.caller,
+        )
+        logger.info(
+            "[manifests] %s published by %s (%d bytes, verified=%s)",
+            provider,
+            caller.caller,
+            len(body.toml.encode("utf-8")),
+            body.verified,
+        )
+        return {"status": "ok", "name": provider, **result}
+
+    @app.delete("/manifests/{name}")
+    async def delete_manifest(request: Request, name: str, caller: AuthResult = Caller) -> dict:
+        """Stop sharing a manifest. Installs that already pulled it keep working."""
+        provider = name.strip().lower()
+        if not await asyncio.to_thread(_store(request).delete_manifest, provider):
+            raise StarletteHTTPException(404, f"no shared manifest named {provider!r}")
+        logger.info("[manifests] %s removed by %s", provider, caller.caller)
+        return {"status": "ok", "name": provider, "deleted": True}
 
     # --- config sync ---
 

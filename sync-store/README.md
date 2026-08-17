@@ -51,6 +51,11 @@ PUT    /models                     patch: {"keywords": {"coding": "vendor/x", "o
 PUT    /models/{keyword}           {model, description?} — one keyword
 DELETE /models/{keyword}           remove; readers fall back to their own default
 
+GET    /manifests                  shared provider manifests; ?full=false omits the TOML
+GET    /manifests/{name}           one manifest, with its document
+PUT    /manifests/{name}           {toml, verified?} — publish; upsert by name
+DELETE /manifests/{name}           stop sharing; installs that pulled it keep working
+
 POST   /config                     {device_id, blob} — blob must be a JSON object
 GET    /config                     ?device_id= optional; newest wins; nulls if empty
 GET    /config/history             metadata only, no blobs
@@ -58,6 +63,30 @@ GET    /config/history             metadata only, no blobs
 
 The config half is Aperture's storage and nothing else. The store never interprets
 the blob; it stores bytes and hands them back.
+
+## Shared provider manifests
+
+Bloom teaches itself to reach a new service by writing a provider manifest — the TOML
+that says where an API lives, how it authenticates, and what operations an agent may
+call. Without somewhere to share it, the next install repeats the same research and
+the same model spend to produce the same document.
+
+**The TOML is opaque here, exactly like a config blob.** This store does not parse it
+and must not start to: the format's rules live in Bloom, are versioned with Bloom, and
+a store enforcing its own stale copy would reject a manifest a newer Bloom considers
+fine — as a 400 that looks like a network problem. The only thing validated is the
+name, because it is the primary key.
+
+The corollary is the important half: **anything read from here is untrusted input.**
+Every manifest was written by somebody's model, so a reader must validate before
+using one. Bloom does, through the same `trusted=False` path it applies to manifests
+written locally — travelling confers nothing.
+
+`verified` is advice, not permission. It records that *some* install proved the
+manifest against a real API, and it is sticky upward: re-publishing from a box that
+has proved nothing does not clear it. A puller still treats the manifest as unverified
+locally until its own credential probes successfully, because working against another
+account is evidence rather than proof.
 
 ## Shared model keywords
 

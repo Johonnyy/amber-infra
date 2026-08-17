@@ -178,6 +178,65 @@ class KeywordMapWrite(BaseModel):
     keywords: dict[str, str | dict | None]
 
 
+#: A provider name: snake_case, short, and the prefix on every tool the provider
+#: contributes. Mirrors Bloom's own rule in `app/providers/registry.py` — this is
+#: the *only* thing about a manifest this store validates, because it is the
+#: primary key. Everything else is Bloom's business; see `MAX_MANIFEST_BYTES`.
+_PROVIDER_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,19}$")
+
+#: A ceiling, not a schema. The store refuses to become a file host, and a manifest
+#: an order of magnitude past Bloom's own 16 KB cap is a mistake either way. It is
+#: deliberately looser than Bloom's, so that tightening or relaxing the real limit
+#: is a change in one repository rather than a negotiation between two.
+MAX_MANIFEST_BYTES = 64 * 1024
+
+
+def validate_provider_name(name: str) -> str:
+    """Return the normalised provider name, or raise ``ValueError``."""
+    cleaned = (name or "").strip().lower()
+    if not cleaned:
+        raise ValueError("provider name must not be empty")
+    if not _PROVIDER_NAME_RE.match(cleaned):
+        raise ValueError(
+            f"provider name {name!r} must be snake_case, start with a letter and be "
+            "at most 20 characters — it prefixes every tool the provider contributes"
+        )
+    return cleaned
+
+
+class ManifestWrite(BaseModel):
+    """Publish one provider manifest.
+
+    ``toml`` is **opaque**. This store does not parse it and must not start to: the
+    format's rules live in Bloom, are versioned with Bloom, and a store enforcing
+    its own stale copy would reject manifests a newer Bloom considers valid. Readers
+    validate — and they must, since anything here was written by somebody's model.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    toml: str = Field(min_length=10, max_length=MAX_MANIFEST_BYTES)
+    #: Whether the publishing install proved this against the real API. Advice for
+    #: other installs, never permission: a puller still marks it unverified locally
+    #: until its own credential probes successfully.
+    verified: bool = False
+
+
+class ManifestRecord(BaseModel):
+    toml: str | None = None
+    verified: bool = False
+    updated_at: str
+    updated_by: str = ""
+
+
+class ManifestsRead(BaseModel):
+    """The shared manifest table, keyed by provider name."""
+
+    manifests: dict[str, ManifestRecord]
+    count: int
+    generated_at: str
+
+
 class ConfigWrite(BaseModel):
     device_id: str = Field(min_length=1)
     #: A JSON object, not an array or scalar. The store never looks inside it; the

@@ -67,6 +67,32 @@ CREATE TABLE IF NOT EXISTS model_keywords (
     updated_at  TEXT    NOT NULL,
     updated_by  TEXT    NOT NULL DEFAULT ''   -- the caller name from the bearer key
 );
+
+-- Shared provider manifests: how to reach one service's API with a credential.
+--
+-- The same shape and the same reasoning as `model_keywords`, one level up. A
+-- manifest is written once, by whichever install's builder first needed the
+-- service, and every other install gets it instead of researching the same API
+-- again. Without this, "Bloom can teach itself a new provider" is true per box and
+-- the second box repeats the work.
+--
+-- **The TOML is opaque here, exactly like a config blob.** This store does not
+-- parse it, does not validate it, and must not start: the rules a manifest is held
+-- to are Bloom's, they are versioned with Bloom, and a store that enforced its own
+-- copy would reject a manifest a newer Bloom considers fine. Readers validate. The
+-- only thing checked here is the name, because it is the primary key.
+--
+-- `verified` travels with it as advice, not permission: it records that *some*
+-- install proved this manifest against the real API. A puller still shows it as
+-- unverified locally until its own credential probes successfully, because a
+-- manifest that worked against another account is evidence, not proof.
+CREATE TABLE IF NOT EXISTS provider_manifests (
+    name        TEXT    PRIMARY KEY,          -- snake_case; the provider's identity
+    toml        TEXT    NOT NULL,             -- opaque; Bloom owns the format
+    verified    INTEGER NOT NULL DEFAULT 0,   -- some install proved it live
+    updated_at  TEXT    NOT NULL,
+    updated_by  TEXT    NOT NULL DEFAULT ''
+);
 """
 
 
@@ -405,6 +431,97 @@ class Store:
             cursor = self._conn.execute(
                 "DELETE FROM model_keywords WHERE keyword = ?", (keyword,)
             )
+            self._conn.commit()
+        return cursor.rowcount > 0
+
+    # --- shared provider manifests ---
+
+    def list_manifests(self, *, with_toml: bool = True) -> dict[str, dict]:
+        """The whole shared manifest table, keyed by provider name.
+
+        ``with_toml=False`` returns the metadata without the documents, which is what
+        an index listing wants: the TOML is the bulk of every row, and a client
+        deciding *whether* to pull does not need it yet.
+        """
+        columns = "name, verified, updated_at, updated_by" + (", toml" if with_toml else "")
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT {columns} FROM provider_manifests ORDER BY name"  # noqa: S608
+            ).fetchall()
+        out: dict[str, dict] = {}
+        for r in rows:
+            entry = {
+                "verified": bool(r["verified"]),
+                "updated_at": r["updated_at"],
+                "updated_by": r["updated_by"],
+            }
+            if with_toml:
+                entry["toml"] = r["toml"]
+            out[r["name"]] = entry
+        return out
+
+    def get_manifest(self, name: str) -> dict | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT name, toml, verified, updated_at, updated_by "
+                "FROM provider_manifests WHERE name = ?",
+                (name,),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "name": row["name"],
+            "toml": row["toml"],
+            "verified": bool(row["verified"]),
+            "updated_at": row["updated_at"],
+            "updated_by": row["updated_by"],
+        }
+
+    def set_manifest(
+        self,
+        *,
+        name: str,
+        toml: str,
+        verified: bool = False,
+        updated_by: str = "",
+        now: str | None = None,
+    ) -> dict:
+        """Publish a manifest. Upsert — one row per provider name, always.
+
+        ``verified`` is sticky upward: an install that proved a manifest live sets
+        it, and a later publish that has not proved anything does not clear it. The
+        flag says "this has worked somewhere", and re-uploading the same document
+        from an unproven box is not evidence that it stopped working.
+        """
+        stamp = now or now_iso()
+        with self._lock:
+            existing = self._conn.execute(
+                "SELECT 1 FROM provider_manifests WHERE name = ?", (name,)
+            ).fetchone()
+            self._conn.execute(
+                """
+                INSERT INTO provider_manifests (name, toml, verified, updated_at, updated_by)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(name) DO UPDATE SET
+                    toml       = excluded.toml,
+                    verified   = MAX(provider_manifests.verified, excluded.verified),
+                    updated_at = excluded.updated_at,
+                    updated_by = excluded.updated_by
+                """,
+                (name, toml, 1 if verified else 0, stamp, updated_by),
+            )
+            self._conn.commit()
+        return {"created": existing is None, "updated_at": stamp}
+
+    def delete_manifest(self, name: str) -> bool:
+        """Remove a shared manifest.
+
+        A hard delete, like a keyword and for the same reason: an install that had
+        pulled this one keeps its local copy and carries on working. Removing it here
+        stops it spreading further; it does not reach into anyone's database.
+        """
+        with self._lock:
+            cursor = self._conn.execute("DELETE FROM provider_manifests WHERE name = ?", (name,))
             self._conn.commit()
         return cursor.rowcount > 0
 
